@@ -1,0 +1,30 @@
+{
+  "name": "chatgpt-remote-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Connect ChatGPT to a Linux computer through OpenAI Secure MCP Tunnel, Desktop Commander and Playwright.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/a820936422/chatgpt-remote-control.git"
+  },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/bridge.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:python": "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test:integration": "node scripts/verify.mjs",
+    "test:desktop": "node scripts/verify.mjs --desktop --browser"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@playwright/mcp": "0.0.82",
+    "@wonderwhy-er/desktop-commander": "0.2.51",
+    "sharp": "0.35.4"
+  },
+  "overrides": {
+    "@wonderwhy-er/desktop-commander": { "sharp": "$sharp" },
+    "exceljs": { "uuid": "11.1.1" }
+  }
+}

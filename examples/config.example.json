@@ -1,0 +1,13 @@
+{
+  "label": "my-linux-computer",
+  "workspace": "/home/YOUR_USER",
+  "desktop": {
+    "enabled": true,
+    "spectaclePath": "spectacle",
+    "kscreenDoctorPath": "kscreen-doctor"
+  },
+  "browser": {
+    "enabled": true,
+    "configFile": "browser.json"
+  }
+}

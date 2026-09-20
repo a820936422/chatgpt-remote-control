@@ -1,0 +1,97 @@
+# ChatGPT Remote Control
+
+Control your own Linux computer from ChatGPT through **OpenAI Secure MCP Tunnel → a local MCP bridge → Desktop Commander, Playwright and KDE desktop tools**.
+
+[中文文档](README.md) · [Security and data access](SECURITY.md) · [Configuration](docs/configuration.md) · [Troubleshooting](docs/troubleshooting.md) · [Validation record](docs/validation.md)
+
+This community project packages a deployment validated on CachyOS / KDE Wayland. It is not an official OpenAI remote desktop product.
+
+## Capabilities
+
+- Read, write, edit and search local files; execute commands and manage processes through Desktop Commander.
+- Navigate websites, read accessibility snapshots, click, type, fill forms, manage tabs, and upload/download files through Playwright MCP.
+- Run a dedicated visible Chrome/Chromium with a persistent login profile.
+- Capture the KDE desktop or active window and inspect monitor layout.
+
+With every feature enabled, the pinned versions expose **53 tools**: 26 Desktop Commander, 25 browser and 2 desktop tools.
+
+**Limitations:** whole-desktop mouse/keyboard control is not implemented. Screenshot capture and valid MCP image delivery do not guarantee that ChatGPT Code Mode can use the image as visual input. Browser automation uses page structure and works without screenshot vision.
+
+## Requirements
+
+Linux x86_64, systemd user services, Python 3.10+, Node.js 22+ and npm. Browser automation requires an installed Chrome/Chromium and a graphical login. Screenshots require KDE Spectacle and `kscreen-doctor`; use `--no-desktop` on other desktops.
+
+Your ChatGPT account/workspace must offer developer plugins with the **Tunnel** connection option. Create a Tunnel in the relevant OpenAI organization and obtain a runtime key with the required **Tunnels Read + Use** permissions. See the [official Secure MCP Tunnels guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+
+Use a distinct Tunnel ID for every simultaneously running computer. A suitably authorized key can be reused, but two active stdio clients must not share one Tunnel ID.
+
+## Install
+
+Run as your normal desktop user, not root:
+
+```bash
+git clone https://github.com/a820936422/chatgpt-remote-control.git
+cd chatgpt-remote-control
+python3 scripts/deploy.py install
+python3 scripts/deploy.py configure
+```
+
+The installer copies the application into the user data directory, installs locked npm dependencies, verifies the pinned official Tunnel binary against SHA-256, and creates a user service. Installation does not start the connection or collect credentials.
+
+`configure` prompts locally for a Tunnel ID and a hidden runtime key, atomically stores them in a mode-600 file inside a private directory, then enables and starts the service. Never put a real key in a command argument, issue, chat or repository.
+
+Options:
+
+```bash
+python3 scripts/deploy.py install --browser /usr/bin/chromium --node /usr/bin/node
+python3 scripts/deploy.py install --proxy http://127.0.0.1:7897
+python3 scripts/deploy.py install --no-desktop
+python3 scripts/deploy.py install --no-desktop --no-browser
+```
+
+The proxy above is an example, not a default. The default health endpoint is bound to `127.0.0.1:18081`; change it with `--health-port`. No public inbound MCP port is required.
+
+## Connect ChatGPT
+
+At <https://chatgpt.com/plugins>, create a plugin such as `desktop-connector`. Select **Tunnel**, select this computer's Tunnel, and use **None / No Authentication** for MCP authentication. The Tunnel itself still authenticates with the runtime key. Scan/save the tools, enable the tools you need, and start a new conversation with the plugin selected.
+
+After changing tools, refresh/rescan the plugin and start a new conversation. Restarting the local service does not guarantee the web client refreshes its cached definitions.
+
+Try:
+
+> Use desktop-connector's browser_navigate to open https://example.com/ on my computer. Read the page using browser_snapshot, click Learn more using its snapshot reference, and report the resulting URL and title. Actually call the browser tools, then close the automation browser with browser_close.
+
+The first browser action opens a separate visible window. Log into websites manually in that window when needed. Persistent cookies and local storage survive browser closure; sites can still expire login sessions. This browser does not attach to your everyday ChatGPT tab.
+
+Default downloads and automatic artifacts are stored in `~/Downloads/ChatGPTBrowser/`. Named relative outputs are resolved against the configured workspace. Prefer explicit absolute file paths.
+
+## Manage and test
+
+```bash
+python3 scripts/deploy.py status
+systemctl --user stop chatgpt-remote-control.service
+systemctl --user start chatgpt-remote-control.service
+python3 scripts/deploy.py uninstall
+```
+
+Uninstall removes the service and preserves files, credentials and browser data. The project does not enable linger or change sleep settings. Desktop features require a logged-in graphical session.
+
+```bash
+npm ci --ignore-scripts
+npm test
+npm run test:python
+npm run test:integration
+npm run test:desktop  # requires a logged-in KDE desktop and Chrome/Chromium
+```
+
+Integration checks create temporary HOME/config/profile directories and do not need Tunnel credentials. CI covers unit tests and MCP discovery/file operations. Desktop tests capture the screen locally and exercise a local browser fixture without uploading screenshot artifacts.
+
+## Versions and licensing
+
+Pinned dependencies: tunnel-client 0.0.14, Desktop Commander 0.2.51, Playwright MCP 0.0.82, MCP SDK 1.30.0, sharp 0.35.4. The lockfile also overrides Desktop Commander's sharp and ExcelJS's uuid (11.1.1) to patched versions; image and spreadsheet compatibility are tested. Revalidate discovery and browser behavior when upgrading dependencies.
+
+The bridge preserves Desktop Commander's resource, prompt and logging interfaces: forwarding only tools can break ChatGPT plugin creation when tools refer to UI resources.
+
+Commands run with the current user's OS permissions. Directory settings and command blocklists are not a system sandbox. Read [SECURITY.md](SECURITY.md) before connecting a machine with sensitive data.
+
+Original project code is [MIT licensed](LICENSE). Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

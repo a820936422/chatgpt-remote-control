@@ -1,0 +1,20 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "userDataDir": "/home/YOUR_USER/.local/share/chatgpt-remote-control/browser-profile",
+    "launchOptions": {
+      "executablePath": "/usr/bin/chromium",
+      "headless": false,
+      "chromiumSandbox": true
+    },
+    "contextOptions": {
+      "viewport": { "width": 1280, "height": 800 },
+      "acceptDownloads": true
+    }
+  },
+  "capabilities": ["core"],
+  "webmcp": false,
+  "imageResponses": "allow",
+  "outputDir": "/home/YOUR_USER/Downloads/ChatGPTBrowser",
+  "timeouts": { "action": 10000, "navigation": 60000 }
+}
