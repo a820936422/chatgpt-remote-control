@@ -28,9 +28,9 @@ import zipfile
 from dataclasses import dataclass
 
 UNIT = "chatgpt-remote-control.service"
-VERSION = "0.0.14"
+VERSION = "0.0.16"
 TUNNEL_URL = f"https://github.com/openai/tunnel-client/releases/download/v{VERSION}/tunnel-client-v{VERSION}-linux-amd64.zip"
-TUNNEL_SHA256 = "15bd17e805cad39d412199115bb9e10a978dd35258a114cdf25dd2ae6681c7d3"
+TUNNEL_SHA256 = "d60cdba019bce451bcc3a15478cc5b9cb11270b049f5b56ea39a80b517f8b117"
 DEFAULT_HEALTH_PORT = 18081
 OPERATION_TIMEOUT = 300
 REPOSITORY = Path(__file__).resolve().parents[1]

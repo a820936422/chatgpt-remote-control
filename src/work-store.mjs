@@ -7,25 +7,56 @@ export const terminalStatus = status => ['completed', 'failed', 'interrupted', '
 export const taskIdFor = requestId => 'work_' + createHash('sha256').update(requestId).digest('hex');
 export const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+export function abortable(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort);
+    const abort = () => { cleanup(); reject(signal.reason ?? new Error('Cancelled')); };
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
+    if (signal.aborted) abort();
+  });
+}
+
 export class WorkStore {
-  constructor(directory) { this.directory = directory; }
-  async initialize() {
+  constructor(directory) { this.directory = directory; this.cache = new Map(); }
+  async initialize({ signal } = {}) {
+    signal?.throwIfAborted();
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    signal?.throwIfAborted();
     const stat = await lstat(this.directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) throw new Error('Work state directory must be owned by the current user.');
+    signal?.throwIfAborted();
     await chmod(this.directory, 0o700);
+    signal?.throwIfAborted();
   }
   filename(taskId) {
     if (!/^work_[a-f0-9]{64}$/.test(taskId)) throw new Error('Invalid task_id.');
     return path.join(this.directory, taskId + '.json');
   }
-  async get(taskId) {
+  remember(task) {
+    const previous = this.cache.get(task.task_id);
+    if (previous && previous.revision > task.revision) return;
+    this.cache.delete(task.task_id);
+    this.cache.set(task.task_id, structuredClone(task));
+    if (this.cache.size > 256) this.cache.delete(this.cache.keys().next().value);
+  }
+  peek(taskId) {
+    this.filename(taskId);
+    const task = this.cache.get(taskId);
+    return task ? structuredClone(task) : null;
+  }
+  async get(taskId, { signal } = {}) {
     try {
+      signal?.throwIfAborted();
       const file = this.filename(taskId);
-      const stat = await lstat(file);
+      const stat = await abortable(lstat(file), signal);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4 * 1024 * 1024) throw new Error('Invalid Work task record.');
-      const task = JSON.parse(await readFile(file, 'utf8'));
+      signal?.throwIfAborted();
+      const task = JSON.parse(await readFile(file, { encoding: 'utf8', signal }));
+      signal?.throwIfAborted();
       if (task.task_id !== taskId) throw new Error('Invalid Work task identity.');
+      this.remember(task);
       return task;
     } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
@@ -40,6 +71,7 @@ export class WorkStore {
       await rename(temporary, filename);
       const directory = await open(this.directory, 'r');
       try { await directory.sync(); } finally { await directory.close(); }
+      this.remember(task);
     }
     finally { await unlink(temporary).catch(() => {}); }
   }
@@ -50,30 +82,44 @@ export class WorkStore {
     for (const name of entries) { const task = await this.get(name.slice(0, -5)); if (task) tasks.push(task); }
     return tasks;
   }
-  async withMutationLease(callback) {
-    await this.initialize();
+  async withMutationLease(callback, { signal } = {}) {
+    await this.initialize({ signal });
     const filename = path.join(this.directory, '.mutation.lock');
     const handle = await open(filename, 'a', 0o600);
     await handle.close();
+    signal?.throwIfAborted();
     const stat = await lstat(filename);
     if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) throw new Error('Invalid Work mutation lock.');
     await chmod(filename, 0o600);
+    signal?.throwIfAborted();
     const env = { ...process.env }; delete env.CONTROL_PLANE_API_KEY;
     // Kernel flock releases on exit/crash; no stale PID locks or timed lease can admit a second sender.
-    const holder = spawn('flock', ['--exclusive', '--timeout', '15', filename, process.execPath, '-e', 'process.stdout.write("locked\\n");process.stdin.resume();'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const holder = spawn('flock', ['--no-fork', '--exclusive', '--timeout', '15', filename, process.execPath, '-e', 'process.stdout.write("locked\\n");process.stdin.resume();'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    holder.stdin.on('error', () => {});
     let acquired = false;
     const exited = new Promise(resolve => holder.once('close', resolve));
     try {
       await new Promise((resolve, reject) => {
-        holder.once('error', () => reject(new Error('Work bridge requires the Linux flock utility.')));
-        holder.stdout.once('data', data => { if (data.toString().startsWith('locked')) { acquired = true; resolve(); } else reject(new Error('Invalid Work lock acknowledgement.')); });
-        holder.once('exit', () => { if (!acquired) reject(new Error('Work bridge is busy acquiring its task journal lock.')); });
+        const cleanup = () => { signal?.removeEventListener('abort', abort); holder.off('error', onError); holder.off('exit', onExit); holder.stdout.off('data', onData); };
+        const abort = () => { cleanup(); reject(signal.reason ?? new Error('Cancelled')); };
+        const onError = () => { cleanup(); reject(new Error('Work bridge requires the Linux flock utility.')); };
+        const onExit = () => { if (!acquired) { cleanup(); reject(new Error('Work bridge is busy acquiring its task journal lock.')); } };
+        const onData = data => { cleanup(); if (data.toString().startsWith('locked')) { acquired = true; resolve(); } else reject(new Error('Invalid Work lock acknowledgement.')); };
+        holder.once('error', onError);
+        holder.stdout.once('data', onData);
+        holder.once('exit', onExit);
+        signal?.addEventListener('abort', abort, { once: true });
         holder.stderr.resume();
+        if (signal?.aborted) abort();
       });
+      signal?.throwIfAborted();
+      // Once a writer starts, cancellation must not unlock its journal before
+      // an in-flight fsync/rename finishes. Read callers may stop awaiting the
+      // lease, but the holder remains until their signal-aware callback settles.
       return await callback();
     } finally {
       holder.stdin.end();
-      if (!acquired) holder.kill();
+      holder.kill();
       await exited;
     }
   }

@@ -23,6 +23,18 @@ systemctl --user is-active chatgpt-remote-control.service
 - 凭据输入取消或验证失败时保留旧值。新凭据写入后的连接失败会保留新值；可在本机交互式终端重新运行 `configure`。
 - 查看 `journalctl --user -u chatgpt-remote-control.service`，对外分享前脱敏。不要使用 `systemctl show --property=Environment` 或打印 `runtime.env` 来收集诊断。
 
+## 网络超时与调用诊断
+
+先查看 `reliability.stateDirectory/diagnostics/bridge-PID.jsonl`，按发生时间与随机 trace 对照 `tools/call` 的 `start`、`attempt`、`retry`、`finish` 事件。默认目录为 `~/.local/state/chatgpt-remote-control/reliability/diagnostics/`；同样的安全 JSON 也写入 stderr，本机文件不依赖 Tunnel 转发。目录权限 `700`、日志权限 `600`，每个 PID 的文件到 5 MiB 时轮转并保留一份旧日志。事件只含进程、工具名、路由、耗时、并发量及错误类别，不含参数、路径、内容、异常消息或密钥。
+
+有 `start` 但没有 `finish` 时，检查该进程是否仍在执行或被取消；有 `finish` 而主聊天仍报告网络错误时，按已返回的任务 ID 或写入回执恢复结果。没有对应日志时，请求可能尚未进入桥接，也可能落在其他实例/时段；本机只读重试不能修复这段云端连接。
+
+固定只读名单中的临时故障最多 3 次总尝试，默认 250 毫秒指数退避，退避上限默认 2000 毫秒。服务器的 `Retry-After` 或 `structuredContent.retry_after_ms` 超过上限时，停止本次调用的重试，不提前发送，也不长时间挂起。取消、权限、`ENOENT` 等错误不重试。浏览器工具、`work_wait` 和修改操作不自动重试；不要因为网络错误就让主聊天无限重发。
+
+对 `write_file` 使用唯一 `request_id`，保留它与原参数，并读取返回的 `write_receipt`。同 ID 重试收到完成回执与 `duplicate: true` 时不会再次追加；收到结果未知时先用独立读回核实文件，不自动换 ID 重写。带 ID 写入提示锁程序不可用时，检查 util-linux 的 `flock` 是否在服务 PATH。未传 ID 的旧调用没有回执去重，同样不能根据超时推断写入失败。Work 派发仍使用原 `request_id` 和 `task_id` 查询，避免另建任务。
+
+安装器固定 Tunnel `0.0.16` 并校验官方 SHA-256，不自动下载最新版。升级是组件更新，云端/代理/本机哪层出现故障仍需按日志和实际结果定位，不能仅凭版本认定网络问题已解决。
+
 ## 没有新工具
 
 默认 Work 关闭，文件、浏览器、桌面全部开启时为 53 个工具。只启用基础工具为 26 个；基础加浏览器为 51 个；基础加桌面为 28 个。开启 Work 再增加 9 个，全功能合计 62 个。
@@ -41,11 +53,13 @@ systemctl --user is-active chatgpt-remote-control.service
 
 ## Work 已接受，但结果未返回
 
-保存 `work_send` 返回的 `task_id`，使用 `work_status`、`work_wait` 和 `work_result` 跟踪同一任务。`work_wait` 最长等待 45 秒，超时返回当前状态，不把未完成任务标成完成。结果应来自指定任务的真实完成事件，不能取另一轮旧回复来替代。
+保存 `work_send` 返回的 `task_id`，使用 `work_status`、`work_wait` 和 `work_result` 跟踪同一任务。`work_wait` 默认等待 5 秒，有效上限 10 秒；旧的最高 45000 输入仍接受但截短。按返回的 `effective_timeout_ms` 和 `retry_after_ms` 继续查询，超时返回当前状态，不把未完成任务标成完成；0 只读缓存，不刷新桌面 IPC。结果应来自指定任务的真实完成事件，不能取另一轮旧回复来替代。
 
 派发请求超时或连接断开时，任务可能已开始；用相同 `request_id` 和相同输入重试查回原记录，或查询已经取得的 `task_id`。不要换 ID 自动重派。连接恢复后仍无法确定完成情况时，先在桌面查看目标，再决定是否中断或继续。
 
 繁忙目标拒绝新派发。等待当前任务结束后续派；需要停止时调用 `work_interrupt`。技能先用 `work_list_skills` 发现准确路径，插件必须在目标会话启用。选择结构化输入不等于保证任务一定调用了组件，验收时仍需检查实际工具/技能使用证据。
+
+同一电脑上的普通 Work 文件和命令任务优先使用目标的原生本机工具；只在需要连接器特定能力或远端机器时走该插件，减少 Tunnel 回环与额外超时。
 
 状态报告 `awaiting_approval` 或 `awaiting_user_input` 时，在桌面目标聊天处理相应请求，再查询同一任务。这些 Work 工具不代替目标应用的审批或用户输入界面。
 

@@ -23,6 +23,14 @@ test('Tunnel key is removed from MCP children without mutating parent env', () =
   assert.equal(clean.DISPLAY, ':9');
 });
 
+test('reliability settings bound retries and keep their journal relative to configuration', () => {
+  const settings = normalizeConfig({ reliability: { stateDirectory: 'receipts' } }, '/tmp/config/settings.json').reliability;
+  assert.equal(settings.stateDirectory, '/tmp/config/receipts');
+  assert.equal(settings.readRetryAttempts, 3);
+  assert.throws(() => normalizeConfig({ reliability: { readRetryAttempts: 4 } }, '/tmp/config.json'));
+  assert.throws(() => normalizeConfig({ reliability: { readRetryBaseMs: 500, readRetryMaxMs: 100 } }, '/tmp/config.json'));
+});
+
 test('desktop subprocesses do not inherit the Tunnel key', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'remote-control-env-test-'));
   const original = { key: process.env.CONTROL_PLANE_API_KEY, display: process.env.DISPLAY };

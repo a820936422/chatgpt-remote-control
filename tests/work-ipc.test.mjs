@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtemp, chmod, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { WorkIpcClient, applyWorkPatches } from '../src/work-ipc.mjs';
 
 const THREAD = 'test-work-thread';
@@ -283,6 +284,33 @@ test('snapshot timeout and cancellation release waiters without claiming complet
   controller.abort();
   await cancelled;
   assert.equal(client.stateWaiters.size, 0);
+});
+
+test('snapshot total deadline includes initialization and closes a cancelled initial connection', async t => {
+  const { client } = await mockDesktop(t, ({ message }) => message.method === 'initialize');
+  const start = performance.now();
+  await assert.rejects(client.snapshot(THREAD, { timeoutMs: 30 }), { code: 'snapshot-timeout' });
+  assert.ok(performance.now() - start < 400);
+  assert.equal(client.pending.size, 0);
+  assert.equal(client.stateWaiters.size, 0);
+  assert.equal(client.socket, null);
+  assert.equal(client.initialized, false);
+});
+
+test('snapshot total deadline includes owner discovery and preserves an established connection', async t => {
+  let block = true;
+  const { client, messages } = await mockDesktop(t, ({ message }) => block && message.method === 'thread-owner-discovery');
+  await client.connect();
+  const start = performance.now();
+  await assert.rejects(client.snapshot(THREAD, { timeoutMs: 30 }), { code: 'snapshot-timeout' });
+  assert.ok(performance.now() - start < 400);
+  assert.equal(client.pending.size, 0);
+  assert.equal(client.stateWaiters.size, 0);
+  assert.equal(client.initialized, true);
+  assert.equal(messages.some(message => message.method === 'thread-stream-following-changed'), false);
+  block = false;
+  assert.equal(await client.discover(THREAD), OWNER);
+  assert.equal(messages.filter(message => message.method === 'initialize').length, 1);
 });
 
 test('stream revision gaps invalidate cached state and refresh a snapshot', async t => {

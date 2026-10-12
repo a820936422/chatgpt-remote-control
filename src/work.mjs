@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { WorkIpcClient } from './work-ipc.mjs';
-import { WorkStore, fingerprint, taskIdFor, terminalStatus, listLocalChats, listLocalSkills } from './work-store.mjs';
+import { WorkStore, fingerprint, taskIdFor, terminalStatus, listLocalChats, listLocalSkills, abortable } from './work-store.mjs';
 import { conversationTurns, summarizeTurn, completedCompactions, findCorrelatedTurn, effectiveTurnSettings } from './work-state.mjs';
 
 const uuidPattern = '^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$';
@@ -22,7 +23,7 @@ export const workToolDefinitions = [
   definition('work_send', 'Start a task or follow-up in an idle existing local Work chat. Optional model and reasoning_effort override the current settings and persist for later turns; omit to inherit. Keeps the workspace, permissions and collaboration mode. Skill/plugin selections are structured inputs. Returns task_id; use work_wait then work_result and check effective_model/effective_reasoning_effort. Busy chats are rejected. Preserve request_id on retries; outcome_unknown is never automatically resent.', { thread_id: threadProperty, request_id: requestProperty, prompt: { type: 'string', minLength: 1, maxLength: 100000 }, model: modelProperty, reasoning_effort: effortProperty, skills: selectionProperty, plugins: selectionProperty }, ['thread_id', 'request_id', 'prompt'], false),
   definition('work_status', 'Read the status and pending approval/input summaries for a task_id. Acknowledged dispatch is not completion. Reconciles uncertain delivery by its recorded turn identity without resending.', { task_id: taskProperty }, ['task_id']),
   definition('work_result', 'Read the final answer, tool-call summaries and changed-file paths for a completed task. Returns its current status while unfinished. Does not return full reasoning or raw conversation history.', { task_id: taskProperty, max_chars: { type: 'integer', minimum: 100, maximum: 50000, default: 20000 } }, ['task_id']),
-  definition('work_wait', 'Wait up to 45 seconds for completion, failure, interruption, approval or user input. Call again with the same task_id if timed out. Does not launch or resend work.', { task_id: taskProperty, timeout_ms: { type: 'integer', minimum: 0, maximum: 45000, default: 30000 } }, ['task_id']),
+  definition('work_wait', 'Wait briefly for completion, failure, interruption, approval or user input. Defaults to 5 seconds; the entire call, including queues and desktop queries, is capped at 10 seconds. Older timeout_ms values up to 45000 are accepted and clamped. timeout_ms=0 reads the task cache without querying Work. If timed out, keep task_id and wait retry_after_ms before checking again. Does not launch, resend or interrupt work.', { task_id: taskProperty, timeout_ms: { type: 'integer', minimum: 0, maximum: 45000, default: 5000 } }, ['task_id']),
   definition('work_interrupt', 'Stop the active turn belonging to a task_id. Uses its exact turn ID and refuses to interrupt a different turn. Does not answer approvals or discard conversation history.', { task_id: taskProperty }, ['task_id'], false),
   definition('work_compact', 'Trigger real context compaction in an idle existing local Work chat. Returns a task_id; completion requires a new completed manual contextCompaction item. Sending /compact as text is not equivalent. Preserve request_id on retries.', { thread_id: threadProperty, request_id: requestProperty }, ['thread_id', 'request_id'], false),
 ];
@@ -92,12 +93,13 @@ export function createWork(config, options = {}) {
   const store = options.store ?? new WorkStore(settings.stateDirectory);
   const locks = new Map();
   const getClient = () => client ??= options.client ?? new WorkIpcClient({ socketPath: settings.socketPath, requestTimeoutMs: settings.requestTimeoutMs });
-  async function serialized(threadId, callback) {
+  async function serialized(threadId, callback, signal) {
     const previous = locks.get(threadId) ?? Promise.resolve();
-    const result = previous.catch(() => {}).then(callback);
+    const result = previous.catch(() => {}).then(() => { signal?.throwIfAborted(); return callback(); });
     const tail = result.catch(() => {});
     locks.set(threadId, tail);
-    try { return await result; } finally { if (locks.get(threadId) === tail) locks.delete(threadId); }
+    void tail.finally(() => { if (locks.get(threadId) === tail) locks.delete(threadId); });
+    return abortable(result, signal);
   }
   function allowed(threadId) {
     if (!new RegExp(uuidPattern).test(threadId)) throw new Error('Invalid thread_id.');
@@ -110,37 +112,91 @@ export function createWork(config, options = {}) {
     if (!settings.allowCodexThreads && state.originator !== 'codex_work_desktop' && state.serviceName !== 'codex_work_desktop') throw new Error('Selected thread is not a local Work chat.');
     return state;
   }
-  async function changed(task, values) {
+  async function changed(task, values, { persist = true, signal } = {}) {
+    signal?.throwIfAborted();
     const before = fingerprint({ ...task, updated_at: null, revision: null });
     Object.assign(task, values);
     if (before !== fingerprint({ ...task, updated_at: null, revision: null })) {
-      task.updated_at = new Date().toISOString(); task.revision = (task.revision ?? 0) + 1; await store.save(task);
+      task.updated_at = new Date().toISOString(); task.revision = (task.revision ?? 0) + 1;
+      if (persist) await store.save(task);
+      else store.remember?.(task);
     }
     return task;
   }
-  async function refresh(task, signal, state) {
+  async function refresh(task, signal, state, { persist = true } = {}) {
     allowed(task.thread_id);
     if (terminalStatus(task.status)) return task;
     state ??= await snapshot(task.thread_id, signal);
+    signal?.throwIfAborted();
+    const change = values => changed(task, values, { persist, signal });
     const pending = pendingRequests(state).slice(0, 20).map(request => ({ id: request.id, method: request.method }));
     if (task.operation === 'compact') {
       const item = completedCompactions(state).find(item => item.source === 'manual' && !task.previous_compaction_ids.includes(item.id));
-      if (item) return changed(task, { status: 'completed', turn_id: item.turn_id, summary: { compaction: item }, error: null, pending_requests: [] });
+      if (item) return change({ status: 'completed', turn_id: item.turn_id, summary: { compaction: item }, error: null, pending_requests: [] });
       const failed = compactionItems(state).find(({ turn, item }) => item.source === 'manual' && !task.previous_compaction_ids.includes(item.id) && ['failed', 'interrupted'].includes(turn.status));
-      if (failed) return changed(task, { status: failed.turn.status, turn_id: failed.turn.turnId ?? failed.turn.id, error: failed.turn.error ?? null, pending_requests: [] });
-      return changed(task, { pending_requests: pending });
+      if (failed) return change({ status: failed.turn.status, turn_id: failed.turn.turnId ?? failed.turn.id, error: failed.turn.error ?? null, pending_requests: [] });
+      return change({ pending_requests: pending });
     }
     const turn = findCorrelatedTurn(state, { turn_id: task.turn_id, client_user_message_id: task.client_user_message_id });
-    if (!turn) return changed(task, { pending_requests: pending });
+    if (!turn) return change({ pending_requests: pending });
     const summary = summarizeTurn(turn, state.threadRuntimeStatus, state.requests);
     Object.assign(summary, effectiveTurnSettings(turn));
     const status = summary.awaiting_approval ? 'awaiting_approval' : summary.awaiting_user_input ? 'awaiting_user_input' : summary.status;
-    return changed(task, { turn_id: summary.turn_id, status, summary, pending_requests: pending, error: summary.error ?? null });
+    return change({ turn_id: summary.turn_id, status, summary, pending_requests: pending, error: summary.error ?? null });
   }
-  async function getTask(taskId, signal) {
-    const task = await store.get(taskId);
+  async function getTask(taskId, signal, { persist = true, onKnown } = {}) {
+    const task = await abortable(store.get(taskId, { signal }), signal);
     if (!task) throw new Error('Unknown task_id.');
-    return serialized(task.thread_id, () => store.withMutationLease(async () => refresh(await store.get(taskId), signal)));
+    onKnown?.(task);
+    if (terminalStatus(task.status)) return task;
+    return serialized(task.thread_id, () => store.withMutationLease(async () => {
+      signal?.throwIfAborted();
+      const current = await abortable(store.get(taskId, { signal }), signal);
+      if (!current) throw new Error('Unknown task_id.');
+      onKnown?.(current);
+      const refreshed = await refresh(current, signal, undefined, { persist });
+      onKnown?.(refreshed);
+      return refreshed;
+    }, { signal }), signal);
+  }
+
+  async function waitForTask(args, signal) {
+    const effectiveTimeout = Math.min(args.timeout_ms ?? 5000, 10000);
+    const end = Date.now() + effectiveTimeout;
+    const stopped = task => terminalStatus(task.status) || ['awaiting_approval', 'awaiting_user_input', 'outcome_unknown'].includes(task.status);
+    let task = store.peek?.(args.task_id) ?? null;
+    const reply = timedOut => ({ ...(task ? statusView(task) : { task_id: args.task_id, status: 'unknown' }),
+      timed_out: timedOut, effective_timeout_ms: effectiveTimeout, retry_after_ms: timedOut ? 2000 : 0 });
+    if (effectiveTimeout === 0) {
+      task ??= await store.get(args.task_id, { signal });
+      if (!task) throw new Error('Unknown task_id.');
+      return reply(!stopped(task));
+    }
+    const budget = new AbortController();
+    const expired = Object.assign(new Error('Work wait time budget expired.'), { code: 'WORK_WAIT_TIMEOUT' });
+    const timer = setTimeout(() => budget.abort(expired), Math.max(0, end - Date.now()));
+    const cancel = () => budget.abort(signal.reason ?? new Error('Cancelled'));
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    try {
+      if (task && terminalStatus(task.status)) return reply(false);
+      do {
+        task = await abortable(getTask(args.task_id, budget.signal, { persist: false, onKnown: current => {
+          if (!task || (current.revision ?? 0) >= (task.revision ?? 0)) task = current;
+        } }), budget.signal);
+        if (stopped(task)) return reply(false);
+        const remaining = end - Date.now();
+        if (remaining <= 0) return reply(true);
+        await delay(Math.min(1000, remaining), undefined, { signal: budget.signal });
+      } while (Date.now() < end);
+      return reply(true);
+    } catch (error) {
+      if (budget.signal.reason === expired && !signal?.aborted) return reply(true);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+    }
   }
   async function start(args, operation, signal) {
     allowed(args.thread_id);
@@ -209,20 +265,7 @@ export function createWork(config, options = {}) {
       }));
     }
     if (name === 'work_wait') {
-      const end = Date.now() + (args.timeout_ms ?? 30000);
-      let task;
-      do {
-        task = await getTask(args.task_id, signal);
-        if (terminalStatus(task.status) || ['awaiting_approval', 'awaiting_user_input', 'outcome_unknown'].includes(task.status)) return { ...statusView(task), timed_out: false };
-        if (Date.now() >= end) break;
-        await new Promise((resolve, reject) => {
-          const abort = () => { clearTimeout(timer); reject(signal.reason ?? new Error('Cancelled')); };
-          const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, Math.min(1000, end - Date.now()));
-          signal?.addEventListener('abort', abort, { once: true });
-          if (signal?.aborted) abort();
-        });
-      } while (Date.now() <= end);
-      return { ...statusView(task), timed_out: true };
+      return waitForTask(args, signal);
     }
     const task = await getTask(args.task_id, signal);
     if (name === 'work_status') return statusView(task);
@@ -238,7 +281,11 @@ export function createWork(config, options = {}) {
       const result = await invoke(name, args, signal);
       return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result,
         ...(['outcome_unknown', 'not_sent'].includes(result.status) ? { isError: true } : {}) };
-    } catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
+    } catch (error) {
+      const errorCode = typeof error.code === 'string' || typeof error.code === 'number' ? error.code : null;
+      return { isError: true, content: [{ type: 'text', text: error.message }],
+        ...(errorCode !== null ? { structuredContent: { error_code: errorCode } } : {}) };
+    }
   }
   return { tools: settings.enabled ? workToolDefinitions : [], call, close: async () => { await client?.close(); } };
 }

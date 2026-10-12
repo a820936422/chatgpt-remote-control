@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createWork, buildWorkInput } from '../src/work.mjs';
 import { WorkStore, taskIdFor, fingerprint } from '../src/work-store.mjs';
+import { performance } from 'node:perf_hooks';
+import { WorkIpcError } from '../src/work-ipc.mjs';
 
 const threadId = 'aaaaaaaa-1111-2222-3333-444444444444';
 const otherThreadId = 'bbbbbbbb-1111-2222-3333-444444444444';
@@ -207,6 +209,181 @@ test('wait yields on approval and result includes concise final output after com
   assert.doesNotMatch(JSON.stringify(done), /private|Commentary/);
   const finishedWait = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 0 }));
   assert.equal(finishedWait.timed_out, false);
+});
+
+test('wait defaults to five seconds and clamps legacy long waits to ten seconds', async t => {
+  const { bridge, client } = await setup(t);
+  const sent = success(await send(bridge, 'bounded-default-001'));
+  client.states.get(threadId).threadRuntimeStatus = { type: 'active', activeFlags: ['waitingOnApproval'] };
+  const normal = success(await bridge.call('work_wait', { task_id: sent.task_id }));
+  assert.equal(normal.effective_timeout_ms, 5000);
+  assert.equal(normal.retry_after_ms, 0);
+  const legacy = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 45000 }));
+  assert.equal(legacy.effective_timeout_ms, 10000);
+  assert.equal(legacy.timed_out, false);
+});
+
+test('zero wait reads the journal cache after restart without IPC or locking', async t => {
+  const { settings, client, store, bridge } = await setup(t);
+  const sent = success(await send(bridge, 'zero-cache-001'));
+  client.snapshot = async () => { throw new Error('A zero wait must not query IPC.'); };
+  store.withMutationLease = async () => { throw new Error('A zero wait must not acquire a lease.'); };
+  const cached = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 0 }));
+  assert.equal(cached.status, 'running');
+  assert.equal(cached.timed_out, true);
+  assert.equal(cached.effective_timeout_ms, 0);
+  assert.equal(cached.retry_after_ms, 2000);
+  const restartedStore = new WorkStore(settings.stateDirectory);
+  restartedStore.withMutationLease = store.withMutationLease;
+  const restarted = createWork({ work: settings }, { client, store: restartedStore });
+  t.after(() => restarted.close());
+  assert.equal(success(await restarted.call('work_wait', { task_id: sent.task_id, timeout_ms: 0 })).status, 'running');
+});
+
+test('wait budget aborts a slow desktop query without interrupting or changing the recorded task', async t => {
+  const { bridge, client, store } = await setup(t);
+  const sent = success(await send(bridge, 'slow-owner-001'));
+  const before = await store.get(sent.task_id);
+  let aborted = false;
+  client.snapshot = async (_thread, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+  });
+  const start = performance.now();
+  const waited = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 80 }));
+  assert.ok(performance.now() - start < 500, 'the total call must not inherit a 10-second IPC timeout');
+  assert.equal(waited.status, 'running');
+  assert.equal(waited.timed_out, true);
+  assert.equal(waited.effective_timeout_ms, 80);
+  assert.equal(waited.retry_after_ms, 2000);
+  assert.equal(aborted, true);
+  assert.deepEqual(await store.get(sent.task_id), before);
+  assert.equal(client.sends.length, 1);
+  assert.equal(client.interrupts.length, 0);
+});
+
+test('wait expires while queued behind a mutation and skips its cancelled callback later', async t => {
+  const { bridge, client } = await setup(t);
+  const sent = success(await send(bridge, 'queued-wait-001'));
+  let entered, release;
+  const inInterrupt = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  client.onInterrupt = async () => {
+    entered();
+    await held;
+    client.states.get(threadId).turns.at(-1).status = 'interrupted';
+    client.states.get(threadId).threadRuntimeStatus = { type: 'idle' };
+    return { ok: true };
+  };
+  const interrupting = bridge.call('work_interrupt', { task_id: sent.task_id });
+  await inInterrupt;
+  let snapshots = 0;
+  const snapshot = client.snapshot.bind(client);
+  client.snapshot = (...args) => { snapshots++; return snapshot(...args); };
+  const start = performance.now();
+  const waited = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 40 }));
+  assert.ok(performance.now() - start < 500);
+  assert.equal(waited.timed_out, true);
+  assert.equal(waited.status, 'running');
+  assert.equal(snapshots, 0);
+  release();
+  success(await interrupting);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(snapshots, 0, 'a cancelled queued read must not query Work after the mutation finishes');
+  assert.equal(success(await bridge.call('work_status', { task_id: sent.task_id })).status, 'interrupted');
+});
+
+test('wait budget cancels a blocked kernel lease and a later read can acquire it', async t => {
+  const { bridge, client, store } = await setup(t);
+  const sent = success(await send(bridge, 'blocked-flock-001'));
+  const before = await store.get(sent.task_id);
+  let entered, release;
+  const acquired = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const holder = new WorkStore(store.directory).withMutationLease(async () => { entered(); await gate; });
+  await acquired;
+  let snapshots = 0;
+  const snapshot = client.snapshot.bind(client);
+  client.snapshot = (...args) => { snapshots++; return snapshot(...args); };
+  const start = performance.now();
+  const waited = success(await bridge.call('work_wait', { task_id: sent.task_id, timeout_ms: 60 }));
+  assert.ok(performance.now() - start < 500, 'a wait must not inherit the 15-second flock timeout');
+  assert.equal(waited.timed_out, true);
+  assert.equal(waited.status, 'running');
+  assert.equal(snapshots, 0);
+  assert.deepEqual(await store.get(sent.task_id), before);
+  release();
+  await holder;
+  await store.withMutationLease(async () => {});
+  assert.equal(snapshots, 0);
+  assert.equal(success(await bridge.call('work_status', { task_id: sent.task_id })).status, 'running');
+});
+
+test('cancelling an acquired writer cannot release its lease before a delayed save finishes', async t => {
+  const { bridge, store, settings } = await setup(t);
+  const sent = success(await send(bridge, 'cancelled-writer-001'));
+  const original = await store.get(sent.task_id);
+  const firstStore = new WorkStore(settings.stateDirectory);
+  const secondStore = new WorkStore(settings.stateDirectory);
+  const controller = new AbortController();
+  let saveEntered, releaseSave, saveFinished;
+  const entered = new Promise(resolve => { saveEntered = resolve; });
+  const gate = new Promise(resolve => { releaseSave = resolve; });
+  const saved = new Promise(resolve => { saveFinished = resolve; });
+  const durableSave = firstStore.save.bind(firstStore);
+  firstStore.save = async task => {
+    saveEntered();
+    await gate;
+    try { await durableSave(task); } finally { saveFinished(); }
+  };
+  let firstSettled = false, secondEntered = false;
+  const first = firstStore.withMutationLease(() => firstStore.save({ ...original, revision: 2, status: 'running' }), { signal: controller.signal });
+  const firstOutcome = first.then(value => { firstSettled = true; return value; }, error => { firstSettled = true; return error; });
+  await entered;
+  controller.abort();
+  const second = secondStore.withMutationLease(async () => {
+    secondEntered = true;
+    await secondStore.save({ ...original, revision: 3, status: 'completed' });
+  });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const releasedBeforeSave = firstSettled;
+  const competingWriterEntered = secondEntered;
+  releaseSave();
+  await saved;
+  await Promise.all([firstOutcome, second]);
+  assert.equal(releasedBeforeSave, false, 'caller cancellation must not abandon an in-flight durable write');
+  assert.equal(competingWriterEntered, false, 'another bridge instance must wait for the cancelled writer to settle');
+  const final = await new WorkStore(settings.stateDirectory).get(sent.task_id);
+  assert.equal(final.status, 'completed');
+  assert.equal(final.revision, 3);
+});
+
+test('a wait deadline also bounds a cold journal read and returns no invented task receipt', async t => {
+  const { bridge, store } = await setup(t);
+  const taskId = taskIdFor('cold-budget-001');
+  store.get = async () => new Promise(() => {});
+  const start = performance.now();
+  const waited = success(await bridge.call('work_wait', { task_id: taskId, timeout_ms: 30 }));
+  assert.ok(performance.now() - start < 500);
+  assert.equal(waited.task_id, taskId);
+  assert.equal(waited.status, 'unknown');
+  assert.equal(waited.timed_out, true);
+  assert.equal(waited.request_id, undefined);
+  assert.equal(store.peek(taskId), null);
+});
+
+test('status exposes a temporary IPC error code without changing its message or leaking the error object', async t => {
+  const { bridge, client } = await setup(t);
+  const sent = success(await send(bridge, 'status-error-code-001'));
+  client.snapshot = async () => {
+    const error = new WorkIpcError('connection-closed', 'Synthetic desktop connection closed.');
+    error.privateArguments = { path: '/private/example', prompt: 'private task' };
+    throw error;
+  };
+  const response = await bridge.call('work_status', { task_id: sent.task_id });
+  failure(response);
+  assert.deepEqual(response.content, [{ type: 'text', text: 'Synthetic desktop connection closed.' }]);
+  assert.deepEqual(response.structuredContent, { error_code: 'connection-closed' });
+  assert.doesNotMatch(JSON.stringify(response), /privateArguments|\/private|private task/);
 });
 
 test('interrupt identifies exactly the task turn and completion cannot stop a subsequent turn', async t => {

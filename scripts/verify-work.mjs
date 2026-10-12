@@ -22,7 +22,7 @@ assert.match(options['thread-id'] ?? '', /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-
 for (const kind of ['plugin', 'skill']) assert.equal(Boolean(options[kind + '-name']), Boolean(options[kind + '-path']), kind + ' name and path must be supplied together.');
 const started = Date.now();
 const report = { started_at: new Date().toISOString(), thread_id: options['thread-id'], checks: [] };
-const client = new Client({ name: 'work-bridge-verification', version: '0.2.1' });
+const client = new Client({ name: 'work-bridge-verification', version: '0.2.2' });
 const env = { ...process.env }; delete env.CONTROL_PLANE_API_KEY;
 if (options.config) env.CRC_CONFIG = path.resolve(options.config);
 const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/bridge.mjs', import.meta.url))], env, stderr: 'pipe' });

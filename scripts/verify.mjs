@@ -32,7 +32,7 @@ const browserConfig = {
 };
 const configFile = path.join(root, 'config.json');
 await writeFile(path.join(root, 'browser.json'), JSON.stringify(browserConfig));
-await writeFile(configFile, JSON.stringify({ label: 'integration-test', workspace: root, desktop: { enabled: true }, browser: { enabled: true, configFile: 'browser.json' } }));
+await writeFile(configFile, JSON.stringify({ label: 'integration-test', workspace: root, reliability: { stateDirectory: path.join(root, 'receipts') }, desktop: { enabled: true }, browser: { enabled: true, configFile: 'browser.json' } }));
 let client;
 let fixture;
 let calls = 0;
@@ -92,6 +92,13 @@ try {
   assert.equal(await readFile(file, 'utf8'), text);
   assert.ok((await call('read_file', { path: file })).content.some(block => block.type === 'text' && block.text.includes('中文写入成功')));
   passed('actual UTF-8 write/read roundtrip');
+  const keyed = { path: file, content: 'KEYED_APPEND_ONCE\n', mode: 'append', request_id: 'integration-append-once' };
+  const firstWrite = await call('write_file', keyed);
+  const secondWrite = await call('write_file', keyed);
+  assert.equal(firstWrite._meta?.write_receipt?.duplicate, false);
+  assert.equal(secondWrite._meta?.write_receipt?.duplicate, true);
+  assert.equal(await readFile(file, 'utf8'), text + keyed.content);
+  passed('keyed append repeats return a receipt and append exactly once');
   const imageFile = path.join(root, 'synthetic.png');
   await sharp({ create: { width: 64, height: 32, channels: 3, background: '#268bd2' } }).png().toFile(imageFile);
   assert.ok((await call('read_file', { path: imageFile })).content.some(block => block.type === 'image'));

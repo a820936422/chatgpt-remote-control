@@ -10,6 +10,12 @@
     "enabled": true,
     "configFile": "browser.json"
   },
+  "reliability": {
+    "readRetryAttempts": 3,
+    "readRetryBaseMs": 250,
+    "readRetryMaxMs": 2000,
+    "stateDirectory": "/home/YOUR_USER/.local/state/chatgpt-remote-control/reliability"
+  },
   "work": {
     "enabled": false,
     "codexHome": "/home/YOUR_USER/.codex",

@@ -38,7 +38,7 @@ flowchart LR
 - Linux **x86_64**，systemd 用户服务，Python **3.10+**，Node.js **22+** 和 npm。
 - 浏览器功能需要已安装 Chrome 或 Chromium，以及可用的图形会话。
 - 桌面截图需要 KDE Plasma、`spectacle` 和 `kscreen-doctor`；验证环境为 KDE Wayland。其他桌面可用 `--no-desktop` 关闭截图功能。
-- 可选 Work 调度需要正在运行的兼容桌面应用，以及 Linux `flock`（通常由 util-linux 提供），用于跨桥接实例的任务锁。
+- Work 调度和带 ID 的文件写入回执需要 Linux `flock`（通常由 util-linux 提供），用于跨桥接实例的锁；Work 调度还需要正在运行的兼容桌面应用。
 - ChatGPT 账号/工作区能够创建开发者插件，并提供 **Tunnel** 连接选项。此能力是否可用以账号实际界面为准，本项目不能开通账号权限。
 - 已在相应组织创建 Secure MCP Tunnel，并持有具备所需 **Tunnels Read + Use** 权限的 runtime key。创建 Tunnel 所需的管理权限与运行权限不同，见[官方文档](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)。
 
@@ -54,7 +54,7 @@ cd chatgpt-remote-control
 python3 scripts/deploy.py install
 ```
 
-安装程序复制项目到用户数据目录，执行锁文件安装，下载并校验固定版本的官方 Tunnel 客户端，生成配置和 systemd 用户服务。不会在安装阶段填写凭据或启动连接。
+安装程序复制项目到用户数据目录，执行锁文件安装，下载并校验固定的官方 Tunnel `0.0.16`，生成配置和 systemd 用户服务。不会在安装阶段填写凭据或启动连接，也不会自动改用最新 release。
 
 可选参数示例：
 
@@ -130,7 +130,7 @@ python3 scripts/deploy.py configure
 | `work_list_skills` | 发现本地技能名称和准确路径 |
 | `work_send` | 向空闲目标派发或续派任务，可选择模型、推理强度、技能和插件 |
 | `work_status` / `work_result` | 按任务 ID 查看执行状态或读取结果 |
-| `work_wait` | 有界等待，最长 45 秒；未完成时返回当前状态 |
+| `work_wait` | 默认等待 5 秒，有效上限 10 秒；0 读取缓存状态 |
 | `work_interrupt` | 按已确认的执行轮中断指定派发任务 |
 | `work_compact` | 请求真实上下文压缩并跟踪其完成状态 |
 
@@ -146,9 +146,21 @@ python3 scripts/deploy.py configure
 
 同一个 `request_id` 和相同输入重试会返回原任务记录；提示、模型、推理强度或组件选择变更后，应使用新 ID。IPC 超时或连接中断时，执行结果可能仍不确定，应复用原 ID 或查询已有 `task_id`，避免重复执行。目标正在运行时，`work_send` 拒绝新任务；可等待结束，或显式中断后再派发。
 
+`work_wait` 返回 `effective_timeout_ms` 和 `retry_after_ms`，主聊天按返回的间隔继续查询同一个任务。兼容旧的 `timeout_ms`（最高 45000），但实际等待会截到 10 秒；传 0 只读缓存，不刷新桌面 IPC。Work 在同一电脑执行常规文件或命令任务时，优先使用它的本机原生工具，减少 Tunnel 回环。
+
 需要压缩时调用 `work_compact`，然后按它返回的 `task_id` 查询或等待；只有真实压缩事件完成才算通过。发送 `/compact` 文字不会代替压缩接口。
 
 此功能使用桌面内部 IPC，默认 `~/.codex/ipc/ipc.sock`，**与桌面版本耦合**。无需重启桌面或启用 `app-server proxy`，只支持桌面中可加载的已有本地 Work 聊天；云端 Work 和新建聊天不在此接口范围内。
+
+## 超时与重复请求
+
+桥接为每次 `tools/call` 输出 `start`、`attempt`、`retry`、`finish` 诊断事件，使用随机 trace 关联进程、工具、路由、耗时、并发量和错误类别，不记录参数、文件路径、内容、异常消息或密钥。同一份安全 JSON 同时写入 stderr 和 `reliability.stateDirectory/diagnostics/bridge-PID.jsonl`，无需依赖 Tunnel 转发日志；目录权限 `700`、日志权限 `600`，每个 PID 的文件到 5 MiB 时轮转并保留一份旧日志。
+
+固定只读名单中的临时故障最多尝试 3 次，默认从 250 毫秒开始指数退避，退避上限默认 2000 毫秒，并尊重服务器 `Retry-After` 或 `structuredContent.retry_after_ms`；服务器要求等待超过上限时停止本次调用，不提前重试或长时间挂起。取消、权限和文件不存在错误不重试；浏览器工具、`work_wait` 及所有修改操作都不自动重试。
+
+`write_file` 可附带唯一 `request_id`，返回 `write_receipt: {receipt_id, request_id, status, duplicate}`。相同 ID 和相同参数再次调用时，已完成请求返回持久回执并标记 `duplicate: true`，避免重复追加；同 ID 更改参数会拒绝。写入意图在执行前同步落盘，传输结果未知时阻止同 ID 再次执行；先读回核实文件，不换 ID 自动重写。省略该参数保留原行为，但没有回执去重保护。
+
+主聊天报告网络超时时，请按 [排错说明](docs/troubleshooting.md#网络超时与调用诊断) 对照本机 trace；请求若尚未到桥接，可能没有日志，本机重试不能修复云端连接问题。Tunnel `0.0.16` 固定升级也不等于确认这些问题已经解决。
 
 ## 日常管理
 
@@ -190,7 +202,7 @@ Work 实机验收另见 `scripts/verify-work.mjs`，需要显式指定已存在�
 
 | 组件 | 固定版本 |
 | --- | --- |
-| OpenAI tunnel-client | 0.0.14，Linux amd64，SHA-256 校验 |
+| OpenAI tunnel-client | 0.0.16，Linux amd64，SHA-256 校验 |
 | Desktop Commander | 0.2.51 |
 | Playwright MCP | 0.0.82 |
 | MCP TypeScript SDK | 1.30.0 |

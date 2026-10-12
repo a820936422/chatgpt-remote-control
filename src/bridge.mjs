@@ -13,6 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { createDesktop } from './desktop.mjs';
 import { createWork } from './work.mjs';
+import { createReliability } from './reliability.mjs';
+import { createWriteReceipts, decorateWriteTool } from './write-receipts.mjs';
+import { createDiagnosticLogger } from './diagnostics.mjs';
 import { allTools, indexTools, connectUpstream, withoutUiTemplate } from './upstream.mjs';
 
 let server;
@@ -35,6 +38,8 @@ try {
   const config = await loadConfig();
   const desktop = createDesktop(config);
   work = createWork(config);
+  const reliability = createReliability(config.reliability, { logger: createDiagnosticLogger(config.reliability) });
+  const writeReceipts = createWriteReceipts(config);
   commander = await connectUpstream('desktop-commander', [fileURLToPath(new URL('../node_modules/@wonderwhy-er/desktop-commander/dist/index.js', import.meta.url)), '--no-onboarding'], config);
   if (config.browser.enabled) browser = await connectUpstream('browser', [fileURLToPath(new URL('../node_modules/@playwright/mcp/cli.js', import.meta.url)), '--config', config.browser.configFile], config, { browser: true });
   let routing;
@@ -44,7 +49,7 @@ try {
     ]);
     if (browserTools.some(tool => !tool.name.startsWith('browser_'))) throw new Error('Unexpected browser tool namespace.');
     const next = indexTools([
-      { owner: 'commander', tools: commanderTools },
+      { owner: 'commander', tools: commanderTools.map(decorateWriteTool) },
       { owner: 'desktop', tools: desktop.tools },
       { owner: 'work', tools: work.tools },
       { owner: 'browser', tools: browserTools },
@@ -56,7 +61,7 @@ try {
   }
   await refreshTools({ timeout: 15000 });
   const capabilities = commander.capabilities;
-  server = new Server({ name: 'chatgpt-remote-control', version: '0.2.1' }, {
+  server = new Server({ name: 'chatgpt-remote-control', version: '0.2.2' }, {
     capabilities: { ...capabilities, tools: { ...capabilities.tools, listChanged: true } },
     instructions: [
       commander.client.getInstructions() ?? '',
@@ -74,6 +79,9 @@ try {
         'Omit filename on browser_take_screenshot to receive inline MCP image content plus a saved file. Specifying filename saves the image and returns only a file reference. Model image support still depends on the client.',
         'Use absolute paths for uploads and named outputs. Default browser output location is configured locally. browser_close closes this browser and preserves its profile. All browser calls share one state, so dependent operations must be sequential.',
       ].join('\n') : '',
+      'Read-only file/status tools have bounded retries for explicitly transient local failures. If a Tunnel error prevents receiving any tool result, retry an explicitly read-only request at most three times with a short increasing delay. Permission, argument and missing-file errors are final. Never repeat a mutation automatically.',
+      'For write_file supply a unique request_id and preserve the same key and arguments after a lost response. Duplicate keyed writes return a durable receipt without repeating the append. Outcome-unknown writes are not replayed; read the target before deciding further action. Never switch request keys to bypass uncertainty.',
+      'For normal local execution, Work should use its native file and terminal tools where available; use this connector for dispatch/status/results and necessary remote plugin access. This avoids unnecessary extra Tunnel round trips.',
     ].filter(Boolean).join('\n\n'),
   });
 
@@ -111,14 +119,17 @@ try {
     const { name, arguments: args = {} } = request.params;
     const owner = routing.routes.get(name);
     if (!owner) throw new McpError(ErrorCode.InvalidParams, 'Unknown tool: ' + name);
-    if (owner === 'desktop') return desktop.call(name, args, extra.signal);
-    if (owner === 'work') return work.call(name, args, extra.signal);
-    const progressToken = request.params._meta?.progressToken;
-    return (owner === 'browser' ? browser : commander).call(request.params, {
-      timeout: 300000, signal: extra.signal,
-      ...(progressToken !== undefined ? { onprogress: progress => {
-        void extra.sendNotification({ method: 'notifications/progress', params: { ...progress, progressToken } }).catch(() => {});
-      } } : {}),
+    return reliability.call({ name, owner, args, signal: extra.signal }, async () => {
+      if (owner === 'desktop') return desktop.call(name, args, extra.signal);
+      if (owner === 'work') return work.call(name, args, extra.signal);
+      const progressToken = request.params._meta?.progressToken;
+      const invoke = params => (owner === 'browser' ? browser : commander).call(params, {
+          timeout: 300000, signal: extra.signal,
+          ...(progressToken !== undefined ? { onprogress: progress => {
+            void extra.sendNotification({ method: 'notifications/progress', params: { ...progress, progressToken } }).catch(() => {});
+          } } : {}),
+        });
+      return name === 'write_file' ? writeReceipts.call(request.params, invoke, extra.signal) : invoke(request.params);
     });
   });
   for (const peer of [commander, browser].filter(Boolean)) {

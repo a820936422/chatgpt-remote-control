@@ -15,6 +15,8 @@
 | 专用浏览器资料 | `~/.local/share/chatgpt-remote-control/browser-profile/` |
 | 默认下载/输出 | `~/Downloads/ChatGPTBrowser/` |
 | 状态目录 | `~/.local/state/chatgpt-remote-control/` |
+| 文件写入回执 | `~/.local/state/chatgpt-remote-control/reliability/` |
+| 本机调用诊断 | `~/.local/state/chatgpt-remote-control/reliability/diagnostics/bridge-PID.jsonl` |
 | Work 任务状态 | `~/.local/state/chatgpt-remote-control/work/` |
 | 本地桌面 IPC | `~/.codex/ipc/ipc.sock` |
 | systemd 用户服务 | `~/.config/systemd/user/chatgpt-remote-control.service` |
@@ -31,6 +33,7 @@
 - `browser.enabled`：控制是否注册 Playwright 工具。
 - `browser.configFile`：Playwright JSON 配置路径。
 - `work.enabled`：是否注册本地 Work 调度工具，默认 `false`。
+- `reliability`：明确只读调用的重试上限、退避和带 ID 写入的回执目录，见下节。
 
 `workspace`、`browser.configFile` 的相对路径基于主配置所在目录解析。JSON 中不会自动展开 `~` 或 `$HOME`；安装程序生成绝对路径。
 
@@ -41,6 +44,42 @@ CRC_CONFIG=/absolute/path/config.json node src/bridge.mjs
 ```
 
 这是 MCP stdio 入口，stdout 用于协议，直接启动后等待输入是正常的。日志只走 stderr。
+
+## 调用稳定性与写入回执
+
+```json
+{
+  "reliability": {
+    "readRetryAttempts": 3,
+    "readRetryBaseMs": 250,
+    "readRetryMaxMs": 2000,
+    "stateDirectory": "/home/YOUR_USER/.local/state/chatgpt-remote-control/reliability"
+  }
+}
+```
+
+`readRetryAttempts` 是总尝试次数（含首次），最多 3 次，默认 3；设为 1 可关闭自动重试。仅固定只读名单中的临时故障适用。退避从 `readRetryBaseMs` 开始按指数增加，以 `readRetryMaxMs` 为上限，默认分别是 250 和 2000 毫秒；配置要求上限不小于初始退避。取消、权限、`ENOENT` 等错误不重试；`browser_*`、`work_wait` 和全部修改操作不自动重试。工具只读提示不会自行将工具加入这份固定名单。
+
+当前名单为 `read_file`（仅本地文件，`isUrl` 未指定或为 `false`）、`get_file_info`、`list_directory`、`get_config`、`desktop_info`、`work_info`、`work_list_chats`、`work_list_skills`、`work_status`、`work_result`。名单中的未知错误也不重试，只有可明确分类的暂时传输/服务故障才适用。
+
+服务器提供的 `Retry-After` 或 `structuredContent.retry_after_ms` 会约束重试等待；要求等待超过 `readRetryMaxMs` 时，本次调用停止重试并返回错误，既不提前重试，也不延长到超出配置的等待时间。
+
+`stateDirectory` 默认使用 XDG 状态目录下的 `chatgpt-remote-control/reliability`，相对路径基于主配置目录。它保存 `write_file` 的持久意图和完成回执，保持私有权限，升级和卸载保留；带 ID 写入依赖 Linux `flock`（util-linux），按请求 ID 加锁协调多个桥接实例。不要把它放入仓库，也不要删除记录后期待旧请求 ID 仍能去重。
+
+`write_file` 可附带唯一 `request_id`，例如：
+
+```json
+{
+  "path": "/absolute/private/path/receipt-test.txt",
+  "content": "写入验收\n",
+  "mode": "append",
+  "request_id": "write-example-unique-001"
+}
+```
+
+写入意图先同步落盘，再交给上游工具执行，回执附在文本结果及 `_meta.write_receipt` 中，字段为 `{receipt_id, request_id, status, duplicate}`，状态为 `completed`、`failed` 或 `outcome_unknown`。首次调用保留上游原回复；同 ID、同参数再调用时返回缓存回执和固定确认文本，标记 `duplicate: true`，不再次执行或重放原回复内容，同 ID 改变参数则拒绝。传输结果未知时保留意图并阻止同 ID 再次执行，需先独立读回核实实际文件。回执持久记录只保留输入哈希、状态和固定回执文本，不保存文件参数、内容或上游原回复；省略 ID 保留上游接口，但没有回执去重保护，两种方式都不自动重试写入。
+
+每个 `tools/call` 同时把安全 JSON 写入 stderr 和 `reliability.stateDirectory/diagnostics/bridge-PID.jsonl`，包括 `start`、`attempt`、`retry`、`finish` 事件、随机 trace、进程 ID、工具/路由、耗时、并发量和错误类别，不包含参数、路径、内容、异常消息或密钥。本机日志不依赖 Tunnel 的 stderr 转发；诊断目录权限 `700`、日志权限 `600`，每个 PID 的文件到 5 MiB 时轮转并保留一份旧日志，这个边界按 PID 计算。trace 标识本机调用；云端请求尚未到达桥接时，可能没有对应事件。
 
 ## 浏览器
 
@@ -84,7 +123,9 @@ Work 调度还需要 Linux `flock`（util-linux）。任务派发通过内核文
 
 `allowedThreadIds` 为空时允许所有匹配的本地 Work 聊天，设为非空数组则仅允许其中 ID。默认 `allowCodexThreads: false`，只允许本地 Work 来源；设为 `true` 可额外允许本地 Codex 聊天。两个条件共同限制发现和任务操作，不能用它访问云端聊天。建议专用测试/工作聊天配合非空 allowlist。
 
-`work_send` 和 `work_compact` 都要求唯一 `request_id`。相同内容重试会复用已保存的任务记录；提示、模型、推理强度或组件选择变更后必须使用新 ID。派发不确定时不能自动重新执行。目标繁忙时先等待或显式中断，再发新任务。`work_wait.timeout_ms` 允许 0 到 45000，默认 30000；0 返回即时状态。
+`work_send` 和 `work_compact` 都要求唯一 `request_id`。相同内容重试会复用已保存的任务记录；提示、模型、推理强度或组件选择变更后必须使用新 ID。派发不确定时不能自动重新执行。目标繁忙时先等待或显式中断，再发新任务。
+
+`work_wait.timeout_ms` 默认 5000，有效上限 10000；兼容旧的 0 到 45000 输入，超过 10000 会截短。返回 `effective_timeout_ms` 和 `retry_after_ms`，主聊天按返回间隔查询同一任务。0 只读取缓存状态，不向桌面 IPC 刷新；任务仍在运行时，未完成状态不会变成完成。Work 在同一电脑上执行常规文件和命令任务时优先使用原生本机工具，减少 Tunnel 回环。
 
 压缩操作通过专用 IPC 请求触发；向聊天发送 `/compact` 文本不等价于调用压缩接口。插件和技能可显式附在任务输入中，但名称和路径必须来自目标会话实际可用的组件。技能要求绝对 `SKILL.md` 文件路径，插件要求 `plugin://ID@SOURCE` 或 `app://ID` 引用；不会安装或启用缺失组件，也不改变目标权限。
 

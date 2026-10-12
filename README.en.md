@@ -22,7 +22,7 @@ Work orchestration is disabled by default. With file, browser and desktop featur
 
 Linux x86_64, systemd user services, Python 3.10+, Node.js 22+ and npm. Browser automation requires an installed Chrome/Chromium and a graphical login. Screenshots require KDE Spectacle and `kscreen-doctor`; use `--no-desktop` on other desktops.
 
-Optional Work orchestration requires a compatible running desktop app and Linux `flock` (normally provided by util-linux) for kernel-backed task locking across bridge instances.
+Work orchestration and keyed write receipts require Linux `flock` (normally provided by util-linux) for kernel-backed locking across bridge instances. Work additionally requires a compatible running desktop app.
 
 Your ChatGPT account/workspace must offer developer plugins with the **Tunnel** connection option. Create a Tunnel in the relevant OpenAI organization and obtain a runtime key with the required **Tunnels Read + Use** permissions. See the [official Secure MCP Tunnels guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
@@ -39,7 +39,7 @@ python3 scripts/deploy.py install
 python3 scripts/deploy.py configure
 ```
 
-The installer copies the application into the user data directory, installs locked npm dependencies, verifies the pinned official Tunnel binary against SHA-256, and creates a user service. Installation does not start the connection or collect credentials.
+The installer copies the application into the user data directory, installs locked npm dependencies, verifies official Tunnel `0.0.16` against its pinned SHA-256, and creates a user service. Installation does not start the connection, collect credentials or automatically select a newer release.
 
 `configure` prompts locally for a Tunnel ID and a hidden runtime key, atomically stores them in a mode-600 file inside a private directory, then enables and starts the service. Never put a real key in a command argument, issue, chat or repository.
 
@@ -80,7 +80,7 @@ Run the desktop app on the target computer and open a dedicated local Work conve
 | `work_list_skills` | Discover local skill names and exact paths |
 | `work_send` | Dispatch or continue a task in an idle conversation, optionally selecting model, reasoning effort, skills and plugins |
 | `work_status` / `work_result` | Inspect status or retrieve results by task ID |
-| `work_wait` | Wait up to 45 seconds, returning current status if still running |
+| `work_wait` | Wait 5 seconds by default, capped at 10 seconds; 0 reads cached status |
 | `work_interrupt` | Interrupt a dispatched task by its confirmed execution turn |
 | `work_compact` | Request real context compaction and track completion |
 
@@ -94,9 +94,21 @@ Optional `skills: [{name, path}]` and `plugins: [{name, path}]` are passed as st
 
 Retries with the same `request_id` and identical input reuse the recorded task. Changing the prompt, model, reasoning effort or component selections requires a new ID. After an IPC timeout, reuse that ID or query the original task; creating another request can duplicate work. `work_compact` also requires `thread_id` and `request_id` and returns a task to track. Only a completed compaction event confirms success; sending `/compact` as text is not equivalent.
 
+`work_wait` returns `effective_timeout_ms` and `retry_after_ms`; follow that interval when polling the same task. Older `timeout_ms` values up to 45000 are accepted but clamped to 10 seconds. A value of 0 reads cached status without refreshing desktop IPC. For ordinary file and command work on the same computer, let Work use its native local tools to reduce Tunnel round trips.
+
 The adapter uses the desktop app's internal IPC at `~/.codex/ipc/ipc.sock` by default. This is version-dependent and requires actual validation after desktop updates. It does not require a desktop restart or `app-server proxy`, create conversations, or access cloud Work. Existing local conversations must be loadable in the running desktop app; open the target there before dispatch.
 
 The live MCP check passed dispatch, idempotent retries, follow-up, actual plugin/skill use, interruption and real compaction on Linux with desktop CLI `0.162.0-alpha.17.2`. See [the validation record](docs/validation.md#本地-work-调度验收2026-10-12) for scope and evidence.
+
+## Timeouts and duplicate requests
+
+Each `tools/call` emits `start`, `attempt`, `retry` and `finish` diagnostics with a random trace, process ID, tool/route, elapsed time, concurrency and error class. Arguments, file paths, content, exception messages and keys are omitted. The same safe JSON goes to stderr and `reliability.stateDirectory/diagnostics/bridge-PID.jsonl`, independently of Tunnel stderr forwarding. The directory is mode 700 and logs are mode 600; each PID's log rotates at 5 MiB with one previous file retained.
+
+Transient failures on a fixed read-only allowlist get at most 3 attempts, with exponential backoff starting at 250 ms and capped at 2000 ms by default. Server `Retry-After` and `structuredContent.retry_after_ms` are respected; a requested delay above the cap stops that call instead of retrying early or waiting indefinitely. Cancellation, permission and missing-file errors are not retried. Browser tools, `work_wait` and all mutations are never automatically retried.
+
+An optional unique `request_id` on `write_file` adds a durable `write_receipt: {receipt_id, request_id, status, duplicate}`. Retrying the same key and arguments after completion returns the cached receipt with `duplicate: true` without appending again; changed arguments with that key are rejected. Intent is synced before execution, and an uncertain transport outcome blocks re-execution with that key. Read back the file before deciding what to do next; do not automatically resend with a new key. Without a key, existing behavior remains available without receipt deduplication.
+
+If a request times out before reaching the bridge, there may be no local trace. Local retries cannot repair cloud-side connectivity, and upgrading to the pinned Tunnel `0.0.16` alone does not establish that the network problem is fixed. See [diagnostic guidance](docs/troubleshooting.md#网络超时与调用诊断).
 
 ## Manage and test
 
@@ -123,7 +135,7 @@ Integration checks create temporary HOME/config/profile directories and do not n
 
 ## Versions and licensing
 
-Pinned dependencies: tunnel-client 0.0.14, Desktop Commander 0.2.51, Playwright MCP 0.0.82, MCP SDK 1.30.0, sharp 0.35.4. The lockfile also overrides Desktop Commander's sharp and ExcelJS's uuid (11.1.1) to patched versions; image and spreadsheet compatibility are tested. Revalidate discovery and browser behavior when upgrading dependencies.
+Pinned dependencies: tunnel-client 0.0.16, Desktop Commander 0.2.51, Playwright MCP 0.0.82, MCP SDK 1.30.0, sharp 0.35.4. The lockfile also overrides Desktop Commander's sharp and ExcelJS's uuid (11.1.1) to patched versions; image and spreadsheet compatibility are tested. Revalidate discovery and browser behavior when upgrading dependencies.
 
 The bridge preserves Desktop Commander's resource, prompt and logging interfaces: forwarding only tools can break ChatGPT plugin creation when tools refer to UI resources.
 

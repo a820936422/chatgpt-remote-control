@@ -3,6 +3,7 @@ import path from 'node:path';
 import { lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { conversationTurns } from './work-state.mjs';
+import { abortable } from './work-store.mjs';
 
 // This is the desktop app's local, versioned follower protocol, not App Server's
 // public JSON-RPC API. A successful mutation response confirms delivery only.
@@ -134,16 +135,18 @@ export class WorkIpcClient {
     this.disposed = false;
   }
 
-  async connect() {
+  async connect({ signal } = {}) {
+    signal?.throwIfAborted();
     if (this.disposed) throw new WorkIpcError('closed', 'Work IPC client is closed.');
     if (this.initialized) return this;
-    if (this.connecting) return this.connecting;
-    this.connecting = this.connectLocal().finally(() => { this.connecting = null; });
-    return this.connecting;
+    if (this.connecting) return abortable(this.connecting, signal);
+    this.connecting = this.connectLocal(signal).finally(() => { this.connecting = null; });
+    return abortable(this.connecting, signal);
   }
 
-  async connectLocal() {
-    const stat = await lstat(this.socketPath);
+  async connectLocal(signal) {
+    const stat = await abortable(lstat(this.socketPath), signal);
+    signal?.throwIfAborted();
     if (this.disposed) throw new WorkIpcError('closed', 'Work IPC client is closed.');
     if (!stat.isSocket() || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw new WorkIpcError('unsafe-socket', 'Work IPC socket must be owned by the current user and inaccessible to other users.');
     const socket = net.createConnection({ path: this.socketPath });
@@ -159,18 +162,22 @@ export class WorkIpcClient {
     try {
       await new Promise((resolve, reject) => {
         let timer;
-        const clean = () => { clearTimeout(timer); socket.off('connect', onConnect); socket.off('error', onError); socket.off('close', onClose); };
+        const clean = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); socket.off('connect', onConnect); socket.off('error', onError); socket.off('close', onClose); };
         const onConnect = () => { clean(); resolve(); };
         const onError = error => { clean(); reject(error); };
         const onClose = () => { clean(); reject(new WorkIpcError('connection-closed', 'Work IPC connection closed before initialization.')); };
+        const onAbort = () => { clean(); reject(cancellation(signal)); };
         timer = setTimeout(() => { clean(); reject(new WorkIpcError('connection-timeout', 'Work IPC connection timed out.')); }, this.requestTimeoutMs);
         socket.once('connect', onConnect);
         socket.once('error', onError);
         socket.once('close', onClose);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
       });
-      const current = await lstat(this.socketPath);
+      const current = await abortable(lstat(this.socketPath), signal);
+      signal?.throwIfAborted();
       if (current.dev !== stat.dev || current.ino !== stat.ino) throw new WorkIpcError('unsafe-socket', 'Work IPC socket changed while connecting.');
-      const response = await this.request('initialize', { clientType: 'chatgpt-remote-control' }, { version: 0 });
+      const response = await this.request('initialize', { clientType: 'chatgpt-remote-control' }, { version: 0, signal });
       if (typeof response.result?.clientId !== 'string' || !response.result.clientId) throw new WorkIpcError('invalid-initialize', 'Desktop IPC did not assign a client ID.');
       this.clientId = response.result.clientId;
       this.initialized = true;
@@ -290,7 +297,8 @@ export class WorkIpcClient {
   async discover(threadId, { signal } = {}) {
     validateThreadId(threadId);
     signal?.throwIfAborted();
-    await this.connect();
+    await this.connect({ signal });
+    signal?.throwIfAborted();
     const response = await this.request('thread-owner-discovery', { hostId: 'local', conversationId: threadId }, { signal });
     const owner = response.handledByClientId;
     if (typeof owner !== 'string' || !owner) throw new WorkIpcError('no-owner', 'No desktop owner was found for this local Work thread.');
@@ -311,28 +319,39 @@ export class WorkIpcClient {
 
   async snapshot(threadId, { timeoutMs, signal } = {}) {
     const timeout = validTimeout(timeoutMs, this.requestTimeoutMs);
-    const owner = await this.discover(threadId, { signal });
-    signal?.throwIfAborted();
-    const cached = this.states.get(threadId);
-    if (cached && !this.threadErrors.has(threadId)) return structuredClone(cached.state);
-    return new Promise((resolve, reject) => {
-      let timer;
-      const waiters = this.stateWaiters.get(threadId) ?? new Set();
-      const clean = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-        waiters.delete(waiter);
-        if (!waiters.size) this.stateWaiters.delete(threadId);
-      };
-      const waiter = { resolve: value => { clean(); resolve(value); }, reject: error => { clean(); reject(error); } };
-      const onAbort = () => waiter.reject(cancellation(signal));
-      waiters.add(waiter);
-      this.stateWaiters.set(threadId, waiters);
-      timer = setTimeout(() => waiter.reject(new WorkIpcError('snapshot-timeout', 'Timed out waiting for a Work thread snapshot.')), timeout);
-      signal?.addEventListener('abort', onAbort, { once: true });
-      this.followed.add(threadId);
-      try { this.following(threadId, owner, true); } catch (error) { waiter.reject(error); }
-    });
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(new WorkIpcError('snapshot-timeout', 'Timed out waiting for a Work thread snapshot.')), timeout);
+    const abort = () => budget.abort(signal.reason ?? cancellation(signal));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const owner = await this.discover(threadId, { signal: budget.signal });
+      budget.signal.throwIfAborted();
+      const cached = this.states.get(threadId);
+      if (cached && !this.threadErrors.has(threadId)) return structuredClone(cached.state);
+      return await new Promise((resolve, reject) => {
+        const waiters = this.stateWaiters.get(threadId) ?? new Set();
+        const clean = () => {
+          budget.signal.removeEventListener('abort', onAbort);
+          waiters.delete(waiter);
+          if (!waiters.size) this.stateWaiters.delete(threadId);
+        };
+        const waiter = { resolve: value => { clean(); resolve(value); }, reject: error => { clean(); reject(error); } };
+        const onAbort = () => waiter.reject(cancellation(budget.signal));
+        waiters.add(waiter);
+        this.stateWaiters.set(threadId, waiters);
+        budget.signal.addEventListener('abort', onAbort, { once: true });
+        this.followed.add(threadId);
+        try { this.following(threadId, owner, true); } catch (error) { waiter.reject(error); }
+        if (budget.signal.aborted) onAbort();
+      });
+    } catch (error) {
+      if (budget.signal.aborted && budget.signal.reason?.code === 'snapshot-timeout') throw budget.signal.reason;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
   stateFor(threadId, options) { return this.snapshot(threadId, options); }
