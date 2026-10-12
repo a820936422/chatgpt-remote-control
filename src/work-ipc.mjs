@@ -9,6 +9,7 @@ import { conversationTurns } from './work-state.mjs';
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DEFINITE_RPC_REJECTIONS = new Set(['no-client-found', 'no-handler-for-request', 'request-version-mismatch', 'client-cannot-handle-request']);
+const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 export class WorkIpcError extends Error {
@@ -33,6 +34,29 @@ function validateThreadId(threadId) {
 
 function validateInput(input) {
   if (!Array.isArray(input) || input.length === 0) throw new TypeError('Work input must be a nonempty array of user input items.');
+}
+
+function validateCollaborationMode(value) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !['default', 'plan'].includes(value.mode) ||
+      Object.keys(value).some(key => !['mode', 'settings'].includes(key))) throw new TypeError('Work collaborationMode must contain a default or plan mode and settings.');
+  const settings = value.settings;
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings) ||
+      Object.keys(settings).some(key => !['model', 'reasoning_effort', 'developer_instructions'].includes(key)) ||
+      typeof settings.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(settings.model) ||
+      !(settings.reasoning_effort === null || REASONING_EFFORTS.has(settings.reasoning_effort)) ||
+      !(settings.developer_instructions === null || typeof settings.developer_instructions === 'string')) throw new TypeError('Work collaborationMode settings require a model ID, a supported reasoning effort or null, and developer instructions or null.');
+  // Capture the selected settings before asynchronous owner discovery so a
+  // caller cannot change the reviewed request while it is waiting to dispatch.
+  return {
+    mode: value.mode,
+    settings: {
+      model: settings.model,
+      reasoning_effort: settings.reasoning_effort,
+      developer_instructions: settings.developer_instructions,
+    },
+  };
 }
 
 function cancellation(signal, outcomeUnknown = false) {
@@ -313,13 +337,19 @@ export class WorkIpcClient {
 
   stateFor(threadId, options) { return this.snapshot(threadId, options); }
 
-  async startTurn(threadId, input, { requestId, clientUserMessageId = randomUUID(), signal } = {}) {
-    let owner;
+  async startTurn(threadId, input, options = {}) {
+    let owner, requestId, clientUserMessageId, signal, collaborationMode;
     try {
+      if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Work startTurn options must be an object.');
+      ({ requestId, clientUserMessageId = randomUUID(), signal } = options);
       validateInput(input);
+      collaborationMode = validateCollaborationMode(options.collaborationMode);
+      if (requestId !== undefined && (typeof requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId))) throw new TypeError('Work IPC requestId must be a UUID.');
+      if (typeof clientUserMessageId !== 'string' || !clientUserMessageId || clientUserMessageId.length > 200 || /[\x00-\x20]/.test(clientUserMessageId)) throw new TypeError('Work clientUserMessageId must be a nonempty message ID.');
       owner = await this.discover(threadId, { signal });
     } catch (error) { throw notSent(error); }
-    const response = await this.request('thread-follower-start-turn', { conversationId: threadId, turnStart: { request: { threadId, clientUserMessageId, input }, context: { inheritThreadSettings: true } } }, { version: 2, targetClientId: owner, requestId, signal, mutating: true });
+    const request = { threadId, clientUserMessageId, input, ...collaborationMode === undefined ? {} : { collaborationMode } };
+    const response = await this.request('thread-follower-start-turn', { conversationId: threadId, turnStart: { request, context: { inheritThreadSettings: true } } }, { version: 2, targetClientId: owner, requestId, signal, mutating: true });
     if (response.result?.result === undefined) throw new WorkIpcError('invalid-response', 'Desktop IPC did not return a turn-start result.', { outcomeUnknown: true });
     return response.result?.result;
   }

@@ -49,13 +49,19 @@ systemctl --user is-active chatgpt-remote-control.service
 
 状态报告 `awaiting_approval` 或 `awaiting_user_input` 时，在桌面目标聊天处理相应请求，再查询同一任务。这些 Work 工具不代替目标应用的审批或用户输入界面。
 
+## Work 模型或推理强度不符合预期
+
+派发时可显式传 `model: "gpt-6.1-sol"`、`reasoning_effort: "medium"`；未传的值继承目标当前设置。明确选择会延续后续 Work 回合，要改回时需再次指定。
+
+对比任务状态/结果的 `requested_model`、`requested_reasoning_effort` 与实际回合的 `effective_model`、`effective_reasoning_effort`；实际回合缺少推理参数时，有效强度为 `null`，不能把请求值当作实际值。有效模型反映该回合最后的重路由目标（如有），主聊天应检查可选的 `model_reroute: {from_model, to_model, reason}`；本桥不自动替换模型，但桌面/服务端可能重路由。还没有实际元数据时先查询同一任务，不把接受派发当作设置验证通过；服务器拒绝时报告原因，变更参数后使用新 `request_id`。
+
 ## Work 压缩未完成
 
 使用 `work_compact` 并保存其返回的 `task_id`，再用状态/等待接口检查真实压缩事件。普通 `/compact` 文本不会触发该接口。已接受、正在压缩、IPC 超时和真实完成是不同状态；压缩中的目标应等其结束后再派任务。
 
 ## Work 实机验收
 
-此脚本需要正在运行的兼容桌面应用、`flock` 和 `work.enabled: true` 的配置，不需要 Tunnel key。先在桌面创建并打开专用本地 Work 测试聊天，再通过 `work_list_chats` 获取其准确 ID。脚本不会新建聊天，会继承所选聊天的模型、工作目录和权限，真实派发验证任务。
+此脚本需要正在运行的兼容桌面应用、`flock` 和 `work.enabled: true` 的配置，不需要 Tunnel key。先在桌面创建并打开专用本地 Work 测试聊天，再通过 `work_list_chats` 获取其准确 ID。脚本不会新建聊天；未显式覆盖模型设置时继承目标当前值，并保留工作目录和权限，真实派发验证任务。
 
 ```bash
 node scripts/verify-work.mjs \

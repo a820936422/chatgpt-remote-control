@@ -128,7 +128,7 @@ python3 scripts/deploy.py configure
 | `work_info` | 查看连接状态、接口限制及配置 |
 | `work_list_chats` | 列出允许范围内的本地聊天信息 |
 | `work_list_skills` | 发现本地技能名称和准确路径 |
-| `work_send` | 向空闲目标派发或续派任务，可指定技能和插件 |
+| `work_send` | 向空闲目标派发或续派任务，可选择模型、推理强度、技能和插件 |
 | `work_status` / `work_result` | 按任务 ID 查看执行状态或读取结果 |
 | `work_wait` | 有界等待，最长 45 秒；未完成时返回当前状态 |
 | `work_interrupt` | 按已确认的执行轮中断指定派发任务 |
@@ -136,11 +136,15 @@ python3 scripts/deploy.py configure
 
 示例指令：
 
-> 使用 desktop-connector 的 work_info 和 work_list_chats，找到我已打开的本地 Work 测试聊天。以新的 request_id 调用 work_send，让它完成我指定的任务。保存返回的 task_id，用 work_wait 和 work_result 取回结果；需要继续时，等当前任务结束后再发送下一项任务。不要把请求已接受当作执行已完成。
+> 使用 desktop-connector 的 work_info 和 work_list_chats，找到我已打开的本地 Work 测试聊天。根据任务复杂度选择执行模型和推理强度，以新的 request_id 调用 work_send，让它完成我指定的任务；例如用 model="gpt-6.1-sol"、reasoning_effort="medium"。保存 task_id，用 work_wait 和 work_result 取回结果，并以 effective_model、effective_reasoning_effort 确认实际回合设置。失败时报告原因，不要悄悄换模型。需要继续时，等当前任务结束后再发送下一项任务。
 
-`work_send` 接受 `thread_id`、`prompt` 和必填的 `request_id`，另可附带 `skills: [{name, path}]`、`plugins: [{name, path}]`。技能路径是 `work_list_skills` 返回的绝对 `SKILL.md` 路径；插件必须在目标 Work 会话可用，路径使用准确的 `plugin://ID@SOURCE` 或 `app://ID` 引用。它们作为结构化输入交给 Work，不自动安装组件，也不改变目标模型、工作目录或权限。
+`work_send` 接受 `thread_id`、`prompt` 和必填的 `request_id`，另可指定 `model`、`reasoning_effort`。省略时继承目标聊天当前设置；显式选择会延续到后续 Work 回合，需要改回时再次明确指定。工作目录、权限、协作模式和已有开发者指令保留。
 
-同一个 `request_id` 和相同输入重试会返回原任务记录；不能用这个 ID 提交不同内容。IPC 超时或连接中断时，执行结果可能仍不确定，应复用原 ID 或查询已有 `task_id`，避免重复执行。目标正在运行时，`work_send` 拒绝新任务；可等待结束，或显式中断后再派发。
+状态和结果返回 `requested_model`、`requested_reasoning_effort`，以及来自实际执行回合的 `effective_model`、`effective_reasoning_effort`；实际回合未提供推理参数时，后者为 `null`，不能用请求值代替。`effective_model` 优先反映该回合最后的重路由目标；本桥不自动换模型，但桌面或服务端可能重路由，主聊天应核对可选的 `model_reroute: {from_model, to_model, reason}`。模型及推理强度由桌面服务器校验，本项目不提供实时模型目录；派发已接受也不代表任务完成。
+
+还可附带 `skills: [{name, path}]`、`plugins: [{name, path}]`。技能路径是 `work_list_skills` 返回的绝对 `SKILL.md` 路径；插件必须在目标 Work 会话可用，路径使用准确的 `plugin://ID@SOURCE` 或 `app://ID` 引用。它们作为结构化输入交给 Work，不自动安装组件或改变权限。
+
+同一个 `request_id` 和相同输入重试会返回原任务记录；提示、模型、推理强度或组件选择变更后，应使用新 ID。IPC 超时或连接中断时，执行结果可能仍不确定，应复用原 ID 或查询已有 `task_id`，避免重复执行。目标正在运行时，`work_send` 拒绝新任务；可等待结束，或显式中断后再派发。
 
 需要压缩时调用 `work_compact`，然后按它返回的 `task_id` 查询或等待；只有真实压缩事件完成才算通过。发送 `/compact` 文字不会代替压缩接口。
 

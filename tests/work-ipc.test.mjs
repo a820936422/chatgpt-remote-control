@@ -163,6 +163,49 @@ test('RPC mutation versions and parameters match desktop follower protocol', asy
   assert.deepEqual(compact.params, { conversationId: THREAD });
 });
 
+test('startTurn forwards explicit model, effort and inherited instructions without changing the mode', async t => {
+  const mock = await mockDesktop(t, ({ socket, message, reply }) => {
+    if (message.method === 'thread-follower-start-turn') {
+      reply(socket, message, { result: { turn: { id: 'configured-turn', status: 'inProgress' } } });
+      return true;
+    }
+  });
+  for (const [mode, effort, instructions] of [['plan', 'medium', 'Keep the existing test instructions.'], ['default', null, null]]) {
+    const collaborationMode = { mode, settings: { model: 'gpt-6.1-sol', reasoning_effort: effort, developer_instructions: instructions } };
+    const expected = structuredClone(collaborationMode);
+    const started = mock.client.startTurn(THREAD, input, { collaborationMode });
+    collaborationMode.settings.model = 'caller-changed-model';
+    await started;
+    const request = mock.messages.filter(message => message.method === 'thread-follower-start-turn').at(-1);
+    assert.deepEqual(request.params.turnStart.request.collaborationMode, expected);
+    assert.deepEqual(request.params.turnStart.context, { inheritThreadSettings: true });
+    assert.equal(request.params.turnStart.request.model, undefined);
+    assert.equal(request.params.turnStart.request.effort, undefined);
+  }
+});
+
+test('startTurn rejects invalid collaboration settings and options before connection or dispatch', async t => {
+  const { client, messages } = await mockDesktop(t);
+  const settings = { model: 'gpt-6.1-sol', reasoning_effort: 'medium', developer_instructions: null };
+  const invalidModes = [
+    null, [], {},
+    { mode: 'unknown', settings },
+    { mode: 'default', settings, extra: true },
+    { mode: 'default', settings: null },
+    { mode: 'default', settings: [] },
+    ...['', ' space-model ', 'line\nbreak', 'm'.repeat(129), false].map(model => ({ mode: 'default', settings: { ...settings, model } })),
+    ...['unsupported', '', 1, undefined].map(reasoning_effort => ({ mode: 'default', settings: { ...settings, reasoning_effort } })),
+    ...[false, 1, undefined].map(developer_instructions => ({ mode: 'default', settings: { ...settings, developer_instructions } })),
+    { mode: 'default', settings: { ...settings, extra: true } },
+  ];
+  const invalidOptions = [null, [], 'invalid', { requestId: 'invalid-uuid' }, { clientUserMessageId: '' }, ...invalidModes.map(collaborationMode => ({ collaborationMode }))];
+  for (const options of invalidOptions) {
+    await assert.rejects(client.startTurn(THREAD, input, options), { delivery: 'not-sent', outcomeUnknown: false });
+  }
+  assert.equal(client.initialized, false);
+  assert.equal(messages.length, 0);
+});
+
 test('steer refuses a stale expected turn without sending the mutation', async t => {
   const { client, messages } = await mockDesktop(t);
   await assert.rejects(client.steerTurn(THREAD, input, { expectedTurnId: 'old-turn' }), { code: 'turn-mismatch' });

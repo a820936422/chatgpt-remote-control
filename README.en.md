@@ -78,7 +78,7 @@ Run the desktop app on the target computer and open a dedicated local Work conve
 | `work_info` | Inspect connectivity, configuration and interface limitations |
 | `work_list_chats` | List permitted local conversation metadata |
 | `work_list_skills` | Discover local skill names and exact paths |
-| `work_send` | Dispatch or continue a task in an idle conversation, optionally selecting skills/plugins |
+| `work_send` | Dispatch or continue a task in an idle conversation, optionally selecting model, reasoning effort, skills and plugins |
 | `work_status` / `work_result` | Inspect status or retrieve results by task ID |
 | `work_wait` | Wait up to 45 seconds, returning current status if still running |
 | `work_interrupt` | Interrupt a dispatched task by its confirmed execution turn |
@@ -86,9 +86,13 @@ Run the desktop app on the target computer and open a dedicated local Work conve
 
 Start with `work_info` and `work_list_chats`. Send `work_send` with `thread_id`, `prompt` and a required unique `request_id`; retain the returned `task_id` for status, wait and result calls. An accepted request does not mean execution has completed. A busy target rejects dispatch: wait for completion or explicitly interrupt before sending another task.
 
-Optional `skills: [{name, path}]` and `plugins: [{name, path}]` are passed as structured Work input. Use `work_list_skills` for absolute `SKILL.md` paths. Plugin paths must be exact `plugin://ID@SOURCE` or `app://ID` references, enabled in that target conversation. Selection does not install components or change the conversation's model, workspace or permissions.
+The main Chat can choose `model` and `reasoning_effort` for the task's complexity, for example `model: "gpt-6.1-sol"` and `reasoning_effort: "medium"`. Omitting them inherits the target's current settings. Explicit selections continue into subsequent Work turns; explicitly select different values when you want to change them again. The target's workspace, permissions, collaboration mode and developer instructions are preserved.
 
-Retries with the same `request_id` and identical input reuse the recorded task. Reusing it for different input is rejected. After an IPC timeout, reuse that ID or query the original task; creating another request can duplicate work. `work_compact` also requires `thread_id` and `request_id` and returns a task to track. Only a completed compaction event confirms success; sending `/compact` as text is not equivalent.
+Status and result calls return `requested_model` and `requested_reasoning_effort`, plus `effective_model` and `effective_reasoning_effort` from the actual execution turn; effective effort is `null` when that turn provides no reasoning parameter, rather than copied from the request. Effective model reflects the turn's last reroute target when present: the bridge does not substitute models, but the desktop or service may reroute, so check optional `model_reroute: {from_model, to_model, reason}`. The desktop server validates availability; this bridge has no live model catalog, and accepted dispatch does not establish completion.
+
+Optional `skills: [{name, path}]` and `plugins: [{name, path}]` are passed as structured Work input. Use `work_list_skills` for absolute `SKILL.md` paths. Plugin paths must be exact `plugin://ID@SOURCE` or `app://ID` references, enabled in that target conversation. Selection does not install components or change permissions.
+
+Retries with the same `request_id` and identical input reuse the recorded task. Changing the prompt, model, reasoning effort or component selections requires a new ID. After an IPC timeout, reuse that ID or query the original task; creating another request can duplicate work. `work_compact` also requires `thread_id` and `request_id` and returns a task to track. Only a completed compaction event confirms success; sending `/compact` as text is not equivalent.
 
 The adapter uses the desktop app's internal IPC at `~/.codex/ipc/ipc.sock` by default. This is version-dependent and requires actual validation after desktop updates. It does not require a desktop restart or `app-server proxy`, create conversations, or access cloud Work. Existing local conversations must be loadable in the running desktop app; open the target there before dispatch.
 

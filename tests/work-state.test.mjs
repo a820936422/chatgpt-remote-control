@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { conversationTurns, findCorrelatedTurn, summarizeTurn, completedCompactions } from '../src/work-state.mjs';
+import { conversationTurns, findCorrelatedTurn, summarizeTurn, completedCompactions, effectiveTurnSettings } from '../src/work-state.mjs';
 
 const turn = (id, extra = {}) => ({ turnId: id, status: 'completed', params: {}, items: [], ...extra });
 const canonical = entries => ({
@@ -111,4 +111,39 @@ test('compaction requires a real completed item and deduplicates canonical/live 
     { id: 'auto', turn_id: 'automatic', completed: true, source: 'automatic', started_at_ms: 200, completed_at_ms: 250 },
   ]);
   assert.deepEqual(completedCompactions({ turns: [turn('accepted-only', { status: 'inProgress' })] }), []);
+});
+
+test('effective model follows the last valid reroute while exposing only routing metadata', () => {
+  const execution = turn('rerouted', {
+    params: { model: 'lower-priority', effort: 'low', collaborationMode: { settings: { model: 'requested-model', reasoning_effort: 'medium' } } },
+    items: [
+      { type: 'reasoning', text: 'private reasoning text' },
+      { type: 'modelRerouted', fromModel: 'requested-model', toModel: 'first-route', reason: 'capacity' },
+      { type: 'modelRerouted', fromModel: 'first-route', toModel: 'final-route', reason: 'service-routing', reasoning: 'private reasoning text' },
+      { type: 'modelRerouted', toModel: '  ', reason: 'invalid-metadata' },
+    ],
+  });
+  const result = effectiveTurnSettings(execution);
+  assert.deepEqual(result, {
+    effective_model: 'final-route', effective_reasoning_effort: 'medium',
+    model_reroute: { from_model: 'first-route', to_model: 'final-route', reason: 'service-routing' },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /private reasoning/);
+  assert.equal(execution.params.collaborationMode.settings.model, 'requested-model');
+});
+
+test('effective settings use nonempty turn fields and never infer effort from a requested-only value', () => {
+  assert.deepEqual(effectiveTurnSettings(turn('configured', {
+    params: { collaborationMode: { settings: { model: 'configured-model', reasoning_effort: 'high' } }, model: 'fallback-model', effort: 'low' },
+  })), { effective_model: 'configured-model', effective_reasoning_effort: 'high' });
+  assert.deepEqual(effectiveTurnSettings(turn('fallback', {
+    params: { collaborationMode: { settings: { model: '', reasoning_effort: ' ' } }, model: 'fallback-model', effort: 'low' },
+  })), { effective_model: 'fallback-model', effective_reasoning_effort: 'low' });
+  assert.deepEqual(effectiveTurnSettings(turn('variant', {
+    params: { model: '', effort: '', reasoningEffort: 'minimal' },
+  })), { effective_model: null, effective_reasoning_effort: 'minimal' });
+  assert.deepEqual(effectiveTurnSettings(turn('unknown', {
+    requestedReasoningEffort: 'high', params: { model: '', effort: '' },
+  })), { effective_model: null, effective_reasoning_effort: null });
+  assert.deepEqual(effectiveTurnSettings(null), { effective_model: null, effective_reasoning_effort: null });
 });

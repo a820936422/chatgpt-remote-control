@@ -13,7 +13,7 @@ const options = {};
 for (let i = 2; i < process.argv.length; i++) {
   const arg = process.argv[i];
   if (['--compact', '--interrupt'].includes(arg)) options[arg.slice(2)] = true;
-  else if (['--thread-id', '--config', '--out', '--plugin-name', '--plugin-path', '--skill-name', '--skill-path'].includes(arg)) {
+  else if (['--thread-id', '--config', '--out', '--plugin-name', '--plugin-path', '--skill-name', '--skill-path', '--model', '--reasoning-effort'].includes(arg)) {
     const value = process.argv[++i]; if (!value || value.startsWith('--')) throw new Error('Missing value: ' + arg);
     options[arg.slice(2)] = value;
   } else throw new Error('Unknown option: ' + arg);
@@ -22,7 +22,7 @@ assert.match(options['thread-id'] ?? '', /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-
 for (const kind of ['plugin', 'skill']) assert.equal(Boolean(options[kind + '-name']), Boolean(options[kind + '-path']), kind + ' name and path must be supplied together.');
 const started = Date.now();
 const report = { started_at: new Date().toISOString(), thread_id: options['thread-id'], checks: [] };
-const client = new Client({ name: 'work-bridge-verification', version: '0.2.0' });
+const client = new Client({ name: 'work-bridge-verification', version: '0.2.1' });
 const env = { ...process.env }; delete env.CONTROL_PLANE_API_KEY;
 if (options.config) env.CRC_CONFIG = path.resolve(options.config);
 const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/bridge.mjs', import.meta.url))], env, stderr: 'pipe' });
@@ -66,16 +66,25 @@ try {
   passed('skill discovery', { skills: skills.skills.length });
   const marker = 'WORK_MCP_OK_' + randomUUID();
   const input = { thread_id: options['thread-id'], request_id: randomUUID(), prompt: '这是用户授权的专用 Work MCP 验收。不要修改文件、执行命令或调用插件。只回复：' + marker };
+  if (options.model) input.model = options.model;
+  if (options['reasoning-effort']) input.reasoning_effort = options['reasoning-effort'];
   const sent = await call('work_send', input);
   const duplicate = await call('work_send', input);
   assert.equal(duplicate.task_id, sent.task_id); assert.equal(duplicate.turn_id, sent.turn_id);
   const result = await complete(sent);
   assert.equal(result.status, 'completed'); assert.ok(result.final_text.includes(marker));
   passed('dispatch, idempotent retry, wait and result', { status: result.status, same_turn_on_retry: true });
+  if (input.model || input.reasoning_effort) {
+    if (input.model) assert.equal(result.effective_model, input.model);
+    if (input.reasoning_effort) assert.equal(result.effective_reasoning_effort, input.reasoning_effort);
+    passed('actual model and reasoning effort override', { requested_model: result.requested_model, requested_reasoning_effort: result.requested_reasoning_effort, effective_model: result.effective_model, effective_reasoning_effort: result.effective_reasoning_effort, turn_id: result.turn_id });
+  }
   const nextMarker = 'WORK_FOLLOWUP_OK_' + randomUUID();
   const followup = await call('work_send', { thread_id: options['thread-id'], request_id: randomUUID(), prompt: '继续同一个测试聊天。不要调用工具，只回复：' + nextMarker });
   const next = await complete(followup); assert.ok(next.final_text.includes(nextMarker));
-  passed('follow-up to the same chat', { status: next.status });
+  if (input.model) assert.equal(next.effective_model, input.model);
+  if (input.reasoning_effort) assert.equal(next.effective_reasoning_effort, input.reasoning_effort);
+  passed('follow-up to the same chat', { status: next.status, effective_model: next.effective_model, effective_reasoning_effort: next.effective_reasoning_effort });
   if (options['plugin-name'] || options['skill-name']) {
     const selection = { thread_id: options['thread-id'], request_id: randomUUID(),
       prompt: '这是指定能力的只读验收。请实际使用附加的技能（若有），按技能流程核实官方 Codex app-server 压缩文档；实际调用附加的 desktop 插件 get_config（若有）一次。不要编辑文件、创建任务或发送消息。最终简洁报告实际使用的技能与工具以及结果，附上 WORK_SELECTION_OK。不可用则明确报告失败。' };

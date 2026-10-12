@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createWork, buildWorkInput } from '../src/work.mjs';
-import { WorkStore, taskIdFor } from '../src/work-store.mjs';
+import { WorkStore, taskIdFor, fingerprint } from '../src/work-store.mjs';
 
 const threadId = 'aaaaaaaa-1111-2222-3333-444444444444';
 const otherThreadId = 'bbbbbbbb-1111-2222-3333-444444444444';
@@ -288,4 +288,114 @@ test('global request keys cannot concurrently dispatch different inputs to diffe
   assert.equal(client.sends.length, 1);
   assert.equal(replies.filter(reply => !reply.isError).length, 1);
   failure(replies.find(reply => reply.isError), /different input/);
+});
+
+test('omitted model overrides preserve the old dispatch shape and legacy retry signature', async t => {
+  const { bridge, client, store } = await setup(t);
+  const signature = fingerprint({ operation: 'send', thread_id: threadId, prompt: 'Do the task.', skills: [], plugins: [] });
+  const fresh = success(await send(bridge, 'default-model-001'));
+  assert.equal(Object.hasOwn(client.sends[0].options, 'collaborationMode'), false);
+  assert.equal(Object.hasOwn(client.sends[0].options, 'model'), false);
+  assert.equal(Object.hasOwn(client.sends[0].options, 'reasoningEffort'), false);
+  assert.equal((await store.get(fresh.task_id)).signature, signature);
+  const oldId = taskIdFor('legacy-model-001');
+  const now = new Date().toISOString();
+  await store.save({
+    task_id: oldId, request_id: 'legacy-model-001', thread_id: threadId,
+    operation: 'send', signature, status: 'completed', turn_id: 'old-turn',
+    created_at: now, updated_at: now, revision: 2, summary: { final_text: 'Old result.' },
+  });
+  const retried = success(await send(bridge, 'legacy-model-001'));
+  assert.equal(retried.task_id, oldId);
+  assert.equal(retried.status, 'completed');
+  assert.equal(Object.hasOwn(retried, 'requested_model'), false);
+  assert.equal(Object.hasOwn(retried, 'requested_reasoning_effort'), false);
+  assert.equal(client.sends.length, 1, 'a legacy task is a receipt, never a second dispatch');
+});
+
+test('model-only, effort-only and combined overrides preserve the owner mode and instructions', async t => {
+  const cases = [
+    { model: 'gpt-6-astra' },
+    { reasoning_effort: 'low' },
+    { model: 'gpt-6-luna', reasoning_effort: 'medium' },
+  ];
+  for (const [index, selection] of cases.entries()) {
+    const { bridge, client, store } = await setup(t);
+    const base = { mode: 'plan', settings: { model: 'gpt-6.1-sol', reasoning_effort: 'high', developer_instructions: 'Retain the plan instructions.' } };
+    const current = client.states.get(threadId);
+    current.latestThreadSettings = { collaborationMode: base };
+    current.latestCollaborationMode = { mode: 'default', settings: { model: 'stale-model', reasoning_effort: 'minimal', developer_instructions: null } };
+    const requestId = 'override-combination-' + index;
+    const expected = { ...base, settings: { ...base.settings, ...selection } };
+    client.onStart = async (_thread, _input, options) => {
+      const intent = await store.get(taskIdFor(requestId));
+      assert.equal(intent.requested_model, selection.model);
+      assert.equal(intent.requested_reasoning_effort, selection.reasoning_effort);
+      assert.deepEqual(options.collaborationMode, expected);
+      current.turns.push(makeTurn(firstTurnId, { params: {
+        clientUserMessageId: options.clientUserMessageId,
+        collaborationMode: structuredClone(expected), model: 'lower-priority-model', effort: 'minimal',
+      } }));
+      current.threadRuntimeStatus = { type: 'active', activeFlags: [] };
+      return { turn: { id: firstTurnId } };
+    };
+    const sent = success(await bridge.call('work_send', { thread_id: threadId, request_id: requestId, prompt: 'Use the selected settings.', ...selection }));
+    assert.equal(sent.requested_model, selection.model);
+    assert.equal(sent.requested_reasoning_effort, selection.reasoning_effort);
+    const status = success(await bridge.call('work_status', { task_id: sent.task_id }));
+    assert.equal(status.effective_model, expected.settings.model);
+    assert.equal(status.effective_reasoning_effort, expected.settings.reasoning_effort);
+    assert.deepEqual(current.latestThreadSettings.collaborationMode, base, 'preparing overrides does not mutate the snapshot');
+  }
+});
+
+test('model and effort selections are part of idempotency even when delivery is unknown', async t => {
+  const { bridge, client } = await setup(t);
+  const current = client.states.get(threadId);
+  current.latestCollaborationMode = { mode: 'default', settings: { model: 'gpt-6.1-sol', reasoning_effort: 'high', developer_instructions: null } };
+  client.onStart = async () => { throw Object.assign(new Error('Response was lost.'), { delivery: 'outcome-unknown' }); };
+  const args = { thread_id: threadId, request_id: 'override-retry-001', prompt: 'Task.', model: 'gpt-6-astra', reasoning_effort: 'high' };
+  const first = failure(await bridge.call('work_send', args));
+  assert.equal(first.status, 'outcome_unknown');
+  const retry = failure(await bridge.call('work_send', { ...args }));
+  assert.equal(retry.task_id, first.task_id);
+  failure(await bridge.call('work_send', { ...args, model: 'gpt-6-luna' }), /different input/);
+  failure(await bridge.call('work_send', { ...args, reasoning_effort: 'low' }), /different input/);
+  assert.equal(client.sends.length, 1);
+});
+
+test('invalid model and effort values fail before creating an intent or sending IPC', async t => {
+  const { bridge, client, store } = await setup(t);
+  const invalid = [
+    { model: '' }, { model: null }, { model: 'model\nname' },
+    { reasoning_effort: null }, { reasoning_effort: 'extreme' }, { reasoning_effort: 'high ' },
+  ];
+  for (const [index, selection] of invalid.entries()) {
+    failure(await bridge.call('work_send', { thread_id: threadId, request_id: 'invalid-override-' + index, prompt: 'Task.', ...selection }));
+  }
+  assert.equal(client.sends.length, 0);
+  assert.deepEqual(await store.list(), []);
+});
+
+test('effective settings come from the matched turn, use plain-field fallback, and remain unknown when absent', async t => {
+  const { bridge, client } = await setup(t);
+  const current = client.states.get(threadId);
+  let count = 0;
+  client.onStart = async (_thread, _input, options) => {
+    count += 1;
+    const id = count === 1 ? firstTurnId : secondTurnId;
+    current.turns.push(makeTurn(id, { status: 'completed', params: {
+      clientUserMessageId: options.clientUserMessageId,
+      model: count === 1 ? 'gpt-6.1-sol' : '', effort: count === 1 ? 'minimal' : '',
+    } }));
+    return { turn: { id } };
+  };
+  const first = success(await send(bridge, 'effective-fallback-001'));
+  const result = success(await bridge.call('work_result', { task_id: first.task_id }));
+  assert.equal(result.effective_model, 'gpt-6.1-sol');
+  assert.equal(result.effective_reasoning_effort, 'minimal');
+  const second = success(await send(bridge, 'effective-fallback-002'));
+  const empty = success(await bridge.call('work_status', { task_id: second.task_id }));
+  assert.equal(empty.effective_model, null);
+  assert.equal(empty.effective_reasoning_effort, null);
 });

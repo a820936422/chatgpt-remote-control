@@ -84,9 +84,27 @@ Work 调度还需要 Linux `flock`（util-linux）。任务派发通过内核文
 
 `allowedThreadIds` 为空时允许所有匹配的本地 Work 聊天，设为非空数组则仅允许其中 ID。默认 `allowCodexThreads: false`，只允许本地 Work 来源；设为 `true` 可额外允许本地 Codex 聊天。两个条件共同限制发现和任务操作，不能用它访问云端聊天。建议专用测试/工作聊天配合非空 allowlist。
 
-`work_send` 和 `work_compact` 都要求唯一 `request_id`。相同内容重试会复用已保存的任务记录；更改内容必须使用新 ID。派发不确定时不能自动重新执行。目标繁忙时先等待或显式中断，再发新任务。`work_wait.timeout_ms` 允许 0 到 45000，默认 30000；0 返回即时状态。
+`work_send` 和 `work_compact` 都要求唯一 `request_id`。相同内容重试会复用已保存的任务记录；提示、模型、推理强度或组件选择变更后必须使用新 ID。派发不确定时不能自动重新执行。目标繁忙时先等待或显式中断，再发新任务。`work_wait.timeout_ms` 允许 0 到 45000，默认 30000；0 返回即时状态。
 
-压缩操作通过专用 IPC 请求触发；向聊天发送 `/compact` 文本不等价于调用压缩接口。插件和技能可显式附在任务输入中，但名称和路径必须来自目标会话实际可用的组件。技能要求绝对 `SKILL.md` 文件路径，插件要求 `plugin://ID@SOURCE` 或 `app://ID` 引用；不会安装或启用缺失组件，目标模型、工作目录和权限仍从原聊天继承。
+压缩操作通过专用 IPC 请求触发；向聊天发送 `/compact` 文本不等价于调用压缩接口。插件和技能可显式附在任务输入中，但名称和路径必须来自目标会话实际可用的组件。技能要求绝对 `SKILL.md` 文件路径，插件要求 `plugin://ID@SOURCE` 或 `app://ID` 引用；不会安装或启用缺失组件，也不改变目标权限。
+
+### 每次派发的模型和推理强度
+
+`work_send` 可选 `model` 和 `reasoning_effort`，由主聊天按任务复杂度选择；省略的设置继承目标 Work 聊天当前值。这些参数属于工具调用，不写在 `work` 配置中。例如：
+
+```json
+{
+  "thread_id": "YOUR_LOCAL_WORK_THREAD_UUID",
+  "request_id": "example-model-selection-001",
+  "prompt": "分析这项任务的实现方案并报告结论。",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "medium"
+}
+```
+
+替换聊天 ID 后提交。显式模型和推理强度会延续到后续 Work 回合；它们不是仅这次调用生效的临时设置。后续需要其他设置时再次明确指定。工作目录、权限、协作模式和已有开发者指令仍保留。
+
+`work_status`、`work_wait` 和 `work_result` 会报告请求值 `requested_model`、`requested_reasoning_effort`，以及实际回合元数据中的 `effective_model`、`effective_reasoning_effort`；缺少实际回合推理参数时，有效强度为 `null`，不从请求值推断。有效模型优先采用该回合最后的重路由目标，主聊天应同时核对可选的 `model_reroute: {from_model, to_model, reason}`。模型及推理强度由桌面服务器校验，本桥不提供实时模型目录或自动替换模型，但桌面/服务端可能重路由；尚未取得实际元数据时不能根据请求已接受推断生效。
 
 ## 代理和端口
 

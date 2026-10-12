@@ -112,6 +112,20 @@ function summarizeError(error) {
     .filter(key => Object.hasOwn(error, key)).map(key => [key, error[key]]));
 }
 
+/** Execution metadata only: requests are not evidence of effective settings. */
+export function effectiveTurnSettings(turn) {
+  const value = setting => typeof setting === 'string' && setting.trim() ? setting : null;
+  const reroute = array(turn?.items).findLast(item => item?.type === 'modelRerouted' && value(item.toModel) !== null);
+  const settings = turn?.params?.collaborationMode?.settings;
+  return {
+    effective_model: value(reroute?.toModel) ?? value(settings?.model) ?? value(turn?.params?.model),
+    effective_reasoning_effort: value(settings?.reasoning_effort) ?? value(turn?.params?.effort) ?? value(turn?.params?.reasoningEffort),
+    ...(reroute ? { model_reroute: {
+      from_model: value(reroute.fromModel), to_model: value(reroute.toModel), reason: value(reroute.reason),
+    } } : {}),
+  };
+}
+
 /** Return task-relevant output, without reasoning, arguments or tool response bodies. */
 export function summarizeTurn(turn, runtime = null, requests = []) {
   const items = array(turn?.items);

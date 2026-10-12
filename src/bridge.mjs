@@ -56,7 +56,7 @@ try {
   }
   await refreshTools({ timeout: 15000 });
   const capabilities = commander.capabilities;
-  server = new Server({ name: 'chatgpt-remote-control', version: '0.2.0' }, {
+  server = new Server({ name: 'chatgpt-remote-control', version: '0.2.1' }, {
     capabilities: { ...capabilities, tools: { ...capabilities.tools, listChanged: true } },
     instructions: [
       commander.client.getInstructions() ?? '',
@@ -64,7 +64,7 @@ try {
       config.desktop.enabled ? 'desktop_screenshot captures the logged-in local KDE desktop, not a cloud browser. Receiving image bytes or dimensions does not prove visual understanding; only describe image contents if the client presents the image to you. desktop_info returns monitor layout.' : '',
       config.work.enabled ? [
         'work_* tools delegate to existing local Work chats in the running desktop app. First use work_list_chats and open the selected chat in the desktop app if its owner is unavailable. These tools do not create chats or control cloud Work.',
-        'work_send starts or continues an idle chat and inherits its model, workspace and permissions. Use structured skills and plugins to select existing capabilities. Save task_id and request_id. Reuse the identical request_id on retries; never automatically resend outcome_unknown with a new key.',
+        'work_send starts or continues an idle chat. Omit model and reasoning_effort to inherit them, or explicitly select available Work settings; the choice persists for later turns. The workspace, permissions and collaboration mode are inherited. Use structured skills/plugins for existing capabilities, and verify effective_model/effective_reasoning_effort in the result. Save task_id/request_id; reuse identical input on retries and never automatically resend outcome_unknown with a new key.',
         'Use work_wait, work_status and work_result to obtain verified progress and results. A dispatch acknowledgement is not completion. Approval and input requests remain for the user; do not assume the main chat can override them.',
         'work_compact triggers actual history compaction. Wait for its task to complete before sending more work. work_interrupt targets only the recorded active turn. The local desktop IPC adapter is experimental and version-dependent.',
       ].join('\n') : '',
