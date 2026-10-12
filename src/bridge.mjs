@@ -12,7 +12,7 @@ import {
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { createDesktop } from './desktop.mjs';
-import { allTools, indexTools, connectUpstream } from './upstream.mjs';
+import { allTools, indexTools, connectUpstream, withoutUiTemplate } from './upstream.mjs';
 
 let server;
 let commander;
@@ -45,6 +45,8 @@ try {
       { owner: 'desktop', tools: desktop.tools },
       { owner: 'browser', tools: browserTools },
     ]);
+    // Routine tool calls return data without automatically opening MCP App cards.
+    if (!config.uiPreviews) next.tools = next.tools.map(withoutUiTemplate);
     routing = next;
     return next.tools;
   }
@@ -76,8 +78,8 @@ try {
       throw error;
     }
   });
-  // These interfaces are required by Desktop Commander's UI-linked tools.
-  // Omitting them caused successful health checks but failed ChatGPT app discovery.
+  // Keep resources discoverable for cached descriptors and optional UI previews.
+  // Omitting these interfaces previously broke ChatGPT app discovery.
   if (capabilities.resources) {
     discovery(ListResourcesRequestSchema, 'resources/list', (params, options) => commander.client.listResources(params, options));
     discovery(ListResourceTemplatesRequestSchema, 'resources/templates/list', (params, options) => commander.client.listResourceTemplates(params, options));

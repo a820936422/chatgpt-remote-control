@@ -28,6 +28,7 @@ export function normalizeConfig(raw, filename) {
   return {
     label,
     workspace: absolute(raw.workspace, base, os.homedir()),
+    uiPreviews: enabled(raw.uiPreviews, false),
     desktop: {
       enabled: enabled(raw.desktop?.enabled, true),
       spectaclePath: command(raw.desktop?.spectaclePath, 'spectacle'),

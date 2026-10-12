@@ -23,6 +23,7 @@
 
 - `label`：工具说明使用的机器标识，默认系统主机名。
 - `workspace`：文件路径和浏览器 workspace，默认用户 HOME。它不是 Shell 沙箱。
+- `uiPreviews`：是否转发上游工具的 MCP App 预览模板，默认 `false`，常规调用只返回结果。设为 `true` 可恢复 Desktop Commander 的配置、文件等预览卡片；修改后重启服务并刷新客户端插件工具列表。
 - `desktop.enabled`：控制是否注册 2 个 KDE 工具。
 - `desktop.spectaclePath`、`desktop.kscreenDoctorPath`：截图和显示器程序，支持绝对路径或可在服务 PATH 中找到的程序名。
 - `browser.enabled`：控制是否注册 Playwright 工具。

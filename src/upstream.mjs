@@ -18,6 +18,19 @@ export async function allTools(client, options = {}) {
   return tools;
 }
 
+export function withoutUiTemplate(tool) {
+  if (!tool._meta) return tool;
+  const meta = { ...tool._meta };
+  delete meta.ui;
+  delete meta['ui/resourceUri'];
+  delete meta['openai/outputTemplate'];
+  delete meta['openai/widgetAccessible'];
+  const result = { ...tool };
+  if (Object.keys(meta).length) result._meta = meta;
+  else delete result._meta;
+  return result;
+}
+
 export function indexTools(groups) {
   const routes = new Map();
   const tools = [];
