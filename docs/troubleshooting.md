@@ -25,9 +25,55 @@ systemctl --user is-active chatgpt-remote-control.service
 
 ## 没有新工具
 
-全部开启时为 53 个工具。只启用基础工具为 26 个；基础加浏览器为 51 个；基础加桌面为 28 个。
+默认 Work 关闭，文件、浏览器、桌面全部开启时为 53 个工具。只启用基础工具为 26 个；基础加浏览器为 51 个；基础加桌面为 28 个。开启 Work 再增加 9 个，全功能合计 62 个。
 
 修改 `config.json` 后先重启用户服务，再到 ChatGPT 插件详情刷新/重新扫描工具并保存，新建聊天重新选择插件。账号或插件的工具开关也会影响可用性。
+
+## Work 无法连接或找不到目标聊天
+
+先调用 `work_info` 查看本地 IPC 是否可用。确认桌面应用以同一 OS 用户身份运行，`work.codexHome` 和 `work.socketPath` 指向当前应用的数据目录及 `ipc/ipc.sock`。不要尝试连接 `app-server proxy` 的控制套接字；此桥接使用的是另一个内部接口。
+
+派发或查询提示无法取得任务锁时，确认系统已安装 util-linux 的 `flock`，且服务 PATH 能找到它。同一个 `stateDirectory` 下的实例会协调派发；不应删除锁文件来绕过正在运行的实例。
+
+`work_list_chats` 只返回允许范围内的本地聊天元数据。检查 `allowedThreadIds`、`allowCodexThreads` 和目标来源；云端 Work 不支持。目标存在但没有可发现的 owner 时，先在桌面应用中打开该聊天，再重试。连接器不创建聊天，不会为找不到的目标启动第二个执行器。
+
+桌面应用升级后出现方法不存在或消息格式错误，可能是内部 IPC 协议变化。保留脱敏错误、桌面版本和最小复现，重新运行专用本地聊天验收；健康端点成功不代表 Work 协议兼容。
+
+## Work 已接受，但结果未返回
+
+保存 `work_send` 返回的 `task_id`，使用 `work_status`、`work_wait` 和 `work_result` 跟踪同一任务。`work_wait` 最长等待 45 秒，超时返回当前状态，不把未完成任务标成完成。结果应来自指定任务的真实完成事件，不能取另一轮旧回复来替代。
+
+派发请求超时或连接断开时，任务可能已开始；用相同 `request_id` 和相同输入重试查回原记录，或查询已经取得的 `task_id`。不要换 ID 自动重派。连接恢复后仍无法确定完成情况时，先在桌面查看目标，再决定是否中断或继续。
+
+繁忙目标拒绝新派发。等待当前任务结束后续派；需要停止时调用 `work_interrupt`。技能先用 `work_list_skills` 发现准确路径，插件必须在目标会话启用。选择结构化输入不等于保证任务一定调用了组件，验收时仍需检查实际工具/技能使用证据。
+
+状态报告 `awaiting_approval` 或 `awaiting_user_input` 时，在桌面目标聊天处理相应请求，再查询同一任务。这些 Work 工具不代替目标应用的审批或用户输入界面。
+
+## Work 压缩未完成
+
+使用 `work_compact` 并保存其返回的 `task_id`，再用状态/等待接口检查真实压缩事件。普通 `/compact` 文本不会触发该接口。已接受、正在压缩、IPC 超时和真实完成是不同状态；压缩中的目标应等其结束后再派任务。
+
+## Work 实机验收
+
+此脚本需要正在运行的兼容桌面应用、`flock` 和 `work.enabled: true` 的配置，不需要 Tunnel key。先在桌面创建并打开专用本地 Work 测试聊天，再通过 `work_list_chats` 获取其准确 ID。脚本不会新建聊天，会继承所选聊天的模型、工作目录和权限，真实派发验证任务。
+
+```bash
+node scripts/verify-work.mjs \
+  --thread-id YOUR_LOCAL_WORK_THREAD_UUID \
+  --config /absolute/path/config.json \
+  --out /absolute/private/path/work-verification.json
+```
+
+基础验收覆盖 9 个工具的发现、同用户 IPC、指定本地聊天和技能发现、任务派发、同 ID 幂等重试、等待与结果，以及向同一聊天续派。按需增加 `--interrupt`、`--compact`，以实际中断测试轮和压缩目标上下文。不要使用日常工作聊天来做这些验证。
+
+指定插件/技能的实际使用验收可增加以下成对参数；将占位符替换为目标会话可用的准确值：
+
+```text
+--plugin-name YOUR_PLUGIN_NAME --plugin-path plugin://YOUR_PLUGIN_ID@YOUR_SOURCE
+--skill-name YOUR_SKILL_NAME --skill-path /absolute/path/SKILL.md
+```
+
+当前该项验收任务面向带 `get_config` 的 desktop 连接器和用于核实官方文档的技能，不能用任意插件替代后仍期待同一测试通过。报告含所选聊天 ID 和任务结果摘要，保持私有，不直接上传到公开仓库。
 
 ## 浏览器无法打开
 

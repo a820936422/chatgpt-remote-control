@@ -12,14 +12,17 @@ This community project packages a deployment validated on CachyOS / KDE Wayland.
 - Navigate websites, read accessibility snapshots, click, type, fill forms, manage tabs, and upload/download files through Playwright MCP.
 - Run a dedicated visible Chrome/Chromium with a persistent login profile.
 - Capture the KDE desktop or active window and inspect monitor layout.
+- Optionally delegate to existing local Work conversations, retrieve results, wait, interrupt and compact their context through the running desktop app.
 
-With every feature enabled, the pinned versions expose **53 tools**: 26 Desktop Commander, 25 browser and 2 desktop tools.
+Work orchestration is disabled by default. With file, browser and desktop features enabled, the pinned versions expose **53 tools**: 26 Desktop Commander, 25 browser and 2 desktop tools. Enabling Work adds 9, for **62 tools** in total.
 
 **Limitations:** whole-desktop mouse/keyboard control is not implemented. Screenshot capture and valid MCP image delivery do not guarantee that ChatGPT Code Mode can use the image as visual input. Browser automation uses page structure and works without screenshot vision.
 
 ## Requirements
 
 Linux x86_64, systemd user services, Python 3.10+, Node.js 22+ and npm. Browser automation requires an installed Chrome/Chromium and a graphical login. Screenshots require KDE Spectacle and `kscreen-doctor`; use `--no-desktop` on other desktops.
+
+Optional Work orchestration requires a compatible running desktop app and Linux `flock` (normally provided by util-linux) for kernel-backed task locking across bridge instances.
 
 Your ChatGPT account/workspace must offer developer plugins with the **Tunnel** connection option. Create a Tunnel in the relevant OpenAI organization and obtain a runtime key with the required **Tunnels Read + Use** permissions. See the [official Secure MCP Tunnels guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
@@ -47,6 +50,7 @@ python3 scripts/deploy.py install --browser /usr/bin/chromium --node /usr/bin/no
 python3 scripts/deploy.py install --proxy http://127.0.0.1:7897
 python3 scripts/deploy.py install --no-desktop
 python3 scripts/deploy.py install --no-desktop --no-browser
+python3 scripts/deploy.py install --enable-work  # newly generated configuration only
 ```
 
 The proxy above is an example, not a default. The default health endpoint is bound to `127.0.0.1:18081`; change it with `--health-port`. No public inbound MCP port is required.
@@ -64,6 +68,31 @@ Try:
 The first browser action opens a separate visible window. Log into websites manually in that window when needed. Persistent cookies and local storage survive browser closure; sites can still expire login sessions. This browser does not attach to your everyday ChatGPT tab.
 
 Default downloads and automatic artifacts are stored in `~/Downloads/ChatGPTBrowser/`. Named relative outputs are resolved against the configured workspace. Prefer explicit absolute file paths.
+
+## Delegate to local Work conversations
+
+Run the desktop app on the target computer and open a dedicated local Work conversation. Enable `work.enabled`, restart this connector service, then refresh the ChatGPT plugin tools. `install --enable-work` enables it only in newly generated configuration; an upgrade preserves existing files. See [configuration](docs/configuration.md#本地-work-调度).
+
+| Tool | Purpose |
+| --- | --- |
+| `work_info` | Inspect connectivity, configuration and interface limitations |
+| `work_list_chats` | List permitted local conversation metadata |
+| `work_list_skills` | Discover local skill names and exact paths |
+| `work_send` | Dispatch or continue a task in an idle conversation, optionally selecting skills/plugins |
+| `work_status` / `work_result` | Inspect status or retrieve results by task ID |
+| `work_wait` | Wait up to 45 seconds, returning current status if still running |
+| `work_interrupt` | Interrupt a dispatched task by its confirmed execution turn |
+| `work_compact` | Request real context compaction and track completion |
+
+Start with `work_info` and `work_list_chats`. Send `work_send` with `thread_id`, `prompt` and a required unique `request_id`; retain the returned `task_id` for status, wait and result calls. An accepted request does not mean execution has completed. A busy target rejects dispatch: wait for completion or explicitly interrupt before sending another task.
+
+Optional `skills: [{name, path}]` and `plugins: [{name, path}]` are passed as structured Work input. Use `work_list_skills` for absolute `SKILL.md` paths. Plugin paths must be exact `plugin://ID@SOURCE` or `app://ID` references, enabled in that target conversation. Selection does not install components or change the conversation's model, workspace or permissions.
+
+Retries with the same `request_id` and identical input reuse the recorded task. Reusing it for different input is rejected. After an IPC timeout, reuse that ID or query the original task; creating another request can duplicate work. `work_compact` also requires `thread_id` and `request_id` and returns a task to track. Only a completed compaction event confirms success; sending `/compact` as text is not equivalent.
+
+The adapter uses the desktop app's internal IPC at `~/.codex/ipc/ipc.sock` by default. This is version-dependent and requires actual validation after desktop updates. It does not require a desktop restart or `app-server proxy`, create conversations, or access cloud Work. Existing local conversations must be loadable in the running desktop app; open the target there before dispatch.
+
+The live MCP check passed dispatch, idempotent retries, follow-up, actual plugin/skill use, interruption and real compaction on Linux with desktop CLI `0.162.0-alpha.17.2`. See [the validation record](docs/validation.md#本地-work-调度验收2026-10-12) for scope and evidence.
 
 ## Manage and test
 
@@ -85,6 +114,8 @@ npm run test:desktop  # requires a logged-in KDE desktop and Chrome/Chromium
 ```
 
 Integration checks create temporary HOME/config/profile directories and do not need Tunnel credentials. CI covers unit tests and MCP discovery/file operations. Desktop tests capture the screen locally and exercise a local browser fixture without uploading screenshot artifacts.
+
+`scripts/verify-work.mjs` is a separate, opt-in live check. It requires `--thread-id` for an existing dedicated local Work chat opened in the desktop app. `--config` selects connector configuration and `--out` stores a private report. Optional paired `--plugin-name`/`--plugin-path` and `--skill-name`/`--skill-path` test actual component use; `--interrupt` and `--compact` additionally exercise interruption and real compaction. It sends actual tasks and never creates a chat. See [the live-check example](docs/troubleshooting.md#work-实机验收).
 
 ## Versions and licensing
 

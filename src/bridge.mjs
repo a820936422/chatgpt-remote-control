@@ -12,18 +12,20 @@ import {
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { createDesktop } from './desktop.mjs';
+import { createWork } from './work.mjs';
 import { allTools, indexTools, connectUpstream, withoutUiTemplate } from './upstream.mjs';
 
 let server;
 let commander;
 let browser;
+let work;
 let stopping = false;
 async function close(code) {
   if (stopping) return;
   stopping = true;
   const timer = setTimeout(() => process.exit(code), 6000);
   timer.unref();
-  await Promise.allSettled([server?.close(), commander?.client.close(), browser?.client.close()]);
+  await Promise.allSettled([server?.close(), commander?.client.close(), browser?.client.close(), work?.close()]);
   clearTimeout(timer);
   process.exit(code);
 }
@@ -32,6 +34,7 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => v
 try {
   const config = await loadConfig();
   const desktop = createDesktop(config);
+  work = createWork(config);
   commander = await connectUpstream('desktop-commander', [fileURLToPath(new URL('../node_modules/@wonderwhy-er/desktop-commander/dist/index.js', import.meta.url)), '--no-onboarding'], config);
   if (config.browser.enabled) browser = await connectUpstream('browser', [fileURLToPath(new URL('../node_modules/@playwright/mcp/cli.js', import.meta.url)), '--config', config.browser.configFile], config, { browser: true });
   let routing;
@@ -43,6 +46,7 @@ try {
     const next = indexTools([
       { owner: 'commander', tools: commanderTools },
       { owner: 'desktop', tools: desktop.tools },
+      { owner: 'work', tools: work.tools },
       { owner: 'browser', tools: browserTools },
     ]);
     // Routine tool calls return data without automatically opening MCP App cards.
@@ -52,12 +56,18 @@ try {
   }
   await refreshTools({ timeout: 15000 });
   const capabilities = commander.capabilities;
-  server = new Server({ name: 'chatgpt-remote-control', version: '0.1.0' }, {
+  server = new Server({ name: 'chatgpt-remote-control', version: '0.2.0' }, {
     capabilities: { ...capabilities, tools: { ...capabilities.tools, listChanged: true } },
     instructions: [
       commander.client.getInstructions() ?? '',
       `This connector operates the user-owned computer ${config.label}. File and shell tools execute there with the current OS user's permissions. Workspace: ${config.workspace}.`,
       config.desktop.enabled ? 'desktop_screenshot captures the logged-in local KDE desktop, not a cloud browser. Receiving image bytes or dimensions does not prove visual understanding; only describe image contents if the client presents the image to you. desktop_info returns monitor layout.' : '',
+      config.work.enabled ? [
+        'work_* tools delegate to existing local Work chats in the running desktop app. First use work_list_chats and open the selected chat in the desktop app if its owner is unavailable. These tools do not create chats or control cloud Work.',
+        'work_send starts or continues an idle chat and inherits its model, workspace and permissions. Use structured skills and plugins to select existing capabilities. Save task_id and request_id. Reuse the identical request_id on retries; never automatically resend outcome_unknown with a new key.',
+        'Use work_wait, work_status and work_result to obtain verified progress and results. A dispatch acknowledgement is not completion. Approval and input requests remain for the user; do not assume the main chat can override them.',
+        'work_compact triggers actual history compaction. Wait for its task to complete before sending more work. work_interrupt targets only the recorded active turn. The local desktop IPC adapter is experimental and version-dependent.',
+      ].join('\n') : '',
       config.browser.enabled ? [
         'browser_* tools operate a dedicated visible browser on this computer, opened on first use. Its persistent profile is separate from the everyday browser. Log in manually in that window when needed.',
         'Use browser_navigate then browser_snapshot for readable page structure and element targets. Perform browser_click, browser_type and browser_fill_form using those targets, then inspect the updated page. This does not require screenshot vision.',
@@ -102,6 +112,7 @@ try {
     const owner = routing.routes.get(name);
     if (!owner) throw new McpError(ErrorCode.InvalidParams, 'Unknown tool: ' + name);
     if (owner === 'desktop') return desktop.call(name, args, extra.signal);
+    if (owner === 'work') return work.call(name, args, extra.signal);
     const progressToken = request.params._meta?.progressToken;
     return (owner === 'browser' ? browser : commander).call(request.params, {
       timeout: 300000, signal: extra.signal,

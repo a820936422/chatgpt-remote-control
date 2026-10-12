@@ -113,6 +113,30 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(config["browser"]["enabled"])
         self.assertFalse(config["desktop"]["enabled"])
         self.assertEqual(config["workspace"], str(self.home))
+        self.assertFalse(config["work"]["enabled"])
+
+    def test_explicit_work_enable_generates_isolated_paths(self):
+        self.install("--enable-work")
+        work = json.loads((self.paths.config / "config.json").read_text())["work"]
+        self.assertTrue(work["enabled"])
+        self.assertEqual(work["codexHome"], str(self.home / ".codex"))
+        self.assertEqual(work["socketPath"], str(self.home / ".codex/ipc/ipc.sock"))
+        self.assertEqual(work["stateDirectory"], str(self.paths.state / "work"))
+        self.assertEqual(work["allowedThreadIds"], [])
+        self.assertFalse(work["allowCodexThreads"])
+        self.assertFalse(Path(work["stateDirectory"]).exists())
+        self.assertFalse(self.paths.runtime.exists())
+        self.systemctl.assert_not_called()
+
+    def test_work_flag_does_not_overwrite_existing_configuration(self):
+        self.install()
+        path = self.paths.config / "config.json"
+        custom = {"workspace": str(self.home), "work": {"enabled": False, "allowedThreadIds": ["private-test-thread"]}}
+        path.write_text(json.dumps(custom))
+        original = path.read_bytes()
+        self.install("--enable-work")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertIn("Existing config.json retained", self.output.getvalue())
 
     def test_xdg_ignored_with_explicit_home(self):
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/unexpected", "XDG_DATA_HOME": "/unexpected", "XDG_STATE_HOME": "/unexpected"}):

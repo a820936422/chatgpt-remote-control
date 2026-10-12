@@ -407,6 +407,7 @@ def install(args: argparse.Namespace) -> None:
     refuse_active_update(paths, args.no_systemd)
     validate_port(args.health_port)
     validate_proxy(args.proxy)
+    retained_config = (paths.config / "config.json").exists() and not args.force_config
     existing = load_deployment(paths) if paths.deployment.exists() and not args.force_config else None
     node = executable(existing["node"] if existing else args.node, ("node",))
     validate_node(node)
@@ -459,6 +460,15 @@ def install(args: argparse.Namespace) -> None:
         "label": socket.gethostname(), "workspace": str(paths.home),
         "desktop": {"enabled": not args.no_desktop, "spectaclePath": shutil.which("spectacle"), "kscreenDoctorPath": shutil.which("kscreen-doctor")},
         "browser": {"enabled": not args.no_browser, "configFile": str(paths.config / "browser.json")},
+        "work": {
+            "enabled": args.enable_work,
+            "codexHome": str(paths.home / ".codex"),
+            "socketPath": str(paths.home / ".codex/ipc/ipc.sock"),
+            "stateDirectory": str(paths.state / "work"),
+            "allowedThreadIds": [],
+            "allowCodexThreads": False,
+            "requestTimeoutMs": 10000,
+        },
     }
     browser_config = {
         "browser": {"browserName": "chromium", "userDataDir": str(paths.data / "browser-profile"),
@@ -486,6 +496,8 @@ def install(args: argparse.Namespace) -> None:
         print("Skipped components must be supplied before configure can start the service.")
     if existing:
         print("Existing deployment settings retained; --force-config explicitly replaces configuration files.")
+    if retained_config and args.enable_work:
+        print("Existing config.json retained: enable its work settings explicitly; --enable-work applies when generating configuration.")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -585,6 +597,7 @@ def parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--health-port", type=int, default=DEFAULT_HEALTH_PORT)
     for name in ("no-browser", "no-desktop", "skip-download", "skip-npm", "no-systemd", "force-config"):
         install_parser.add_argument(f"--{name}", action="store_true")
+    install_parser.add_argument("--enable-work", action="store_true", help="Enable local Work tools in newly generated configuration; preserve existing config by default")
     install_parser.set_defaults(func=install)
     for name, function in (("configure", configure), ("status", status), ("uninstall", uninstall)):
         sub = commands.add_parser(name)

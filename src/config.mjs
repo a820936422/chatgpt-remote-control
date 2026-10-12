@@ -21,10 +21,16 @@ const command = (value, fallback) => {
 
 export function normalizeConfig(raw, filename) {
   if (!object(raw)) throw new Error('Configuration must be a JSON object.');
-  for (const key of ['desktop', 'browser']) if (raw[key] !== undefined && !object(raw[key])) throw new Error(`${key} must be an object.`);
+  for (const key of ['desktop', 'browser', 'work']) if (raw[key] !== undefined && !object(raw[key])) throw new Error(`${key} must be an object.`);
   const base = path.dirname(path.resolve(filename));
   const label = raw.label ?? os.hostname();
   if (typeof label !== 'string' || !label.trim() || label.length > 120 || /[\x00-\x1f]/.test(label)) throw new Error('label must be a short nonempty string.');
+  const work = raw.work ?? {};
+  const codexHome = absolute(work.codexHome, base, path.join(os.homedir(), '.codex'));
+  const allowedThreadIds = work.allowedThreadIds ?? [];
+  if (!Array.isArray(allowedThreadIds) || allowedThreadIds.some(id => typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id))) throw new Error('work.allowedThreadIds must contain thread UUIDs.');
+  const requestTimeoutMs = work.requestTimeoutMs ?? 10000;
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 30000) throw new Error('work.requestTimeoutMs must be between 1000 and 30000.');
   return {
     label,
     workspace: absolute(raw.workspace, base, os.homedir()),
@@ -37,6 +43,15 @@ export function normalizeConfig(raw, filename) {
     browser: {
       enabled: enabled(raw.browser?.enabled, true),
       configFile: absolute(raw.browser?.configFile, base, path.join(base, 'browser.json')),
+    },
+    work: {
+      enabled: enabled(work.enabled, false),
+      codexHome,
+      socketPath: absolute(work.socketPath, base, path.join(codexHome, 'ipc', 'ipc.sock')),
+      stateDirectory: absolute(work.stateDirectory, base, path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'chatgpt-remote-control', 'work')),
+      allowedThreadIds: [...new Set(allowedThreadIds)],
+      allowCodexThreads: enabled(work.allowCodexThreads, false),
+      requestTimeoutMs,
     },
   };
 }

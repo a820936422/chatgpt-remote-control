@@ -9,5 +9,14 @@
   "browser": {
     "enabled": true,
     "configFile": "browser.json"
+  },
+  "work": {
+    "enabled": false,
+    "codexHome": "/home/YOUR_USER/.codex",
+    "socketPath": "/home/YOUR_USER/.codex/ipc/ipc.sock",
+    "stateDirectory": "/home/YOUR_USER/.local/state/chatgpt-remote-control/work",
+    "allowedThreadIds": [],
+    "allowCodexThreads": false,
+    "requestTimeoutMs": 10000
   }
 }

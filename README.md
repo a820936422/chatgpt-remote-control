@@ -1,6 +1,6 @@
 # ChatGPT Remote Control
 
-通过 **ChatGPT 网页端 → OpenAI Secure MCP Tunnel → 本机 MCP 桥接**，操作你自己的 Linux 电脑：读写文件、执行命令、控制浏览器，以及截取 KDE 桌面。
+通过 **ChatGPT 网页端 → OpenAI Secure MCP Tunnel → 本机 MCP 桥接**，操作你自己的 Linux 电脑：读写文件、执行命令、控制浏览器、截取 KDE 桌面，并可选地向本地 Work 聊天派发任务和取回结果。
 
 [English](README.en.md) · [配置说明](docs/configuration.md) · [排错与验收](docs/troubleshooting.md) · [验证记录](docs/validation.md) · [权限与数据](SECURITY.md)
 
@@ -14,10 +14,11 @@
 | 网页读取、点击、中文输入、表单、标签页、上传下载 | Playwright MCP | 已验证 |
 | 独立可见浏览器及登录状态保存 | Chrome / Chromium 持久配置 | 已验证 |
 | 全桌面、活动窗口截图及显示器信息 | KDE Spectacle / KScreen | 已验证图像采集与返回 |
+| 向本地 Work 聊天派发、续派、查询、取回结果、等待、中断、压缩 | 桌面应用内部 IPC，可选启用 | 已通过专用本地聊天实测，仍需兼容桌面版本 |
 | ChatGPT 根据截图理解屏幕 | 取决于网页客户端图像支持 | **不保证；当前验证环境存在限制** |
 | 任意桌面应用的鼠标和键盘控制 | 尚未接入 | 不支持 |
 
-全部启用时，固定版本提供 **53 个工具**：26 个 Desktop Commander 工具、25 个浏览器工具、2 个桌面工具。浏览器操作使用网页结构和元素引用，不依赖截图视觉。
+默认不启用 Work 调度。文件、浏览器和桌面功能全部启用时，固定版本提供 **53 个工具**：26 个 Desktop Commander 工具、25 个浏览器工具、2 个桌面工具。再启用 Work 时增加 9 个，合计 **62 个工具**。浏览器操作使用网页结构和元素引用，不依赖截图视觉。
 
 ```mermaid
 flowchart LR
@@ -27,6 +28,7 @@ flowchart LR
     D --> E[Desktop Commander\n文件 / Shell / 进程]
     D --> F[Playwright MCP\n独立 Chrome / Chromium]
     D --> G[Spectacle + KScreen\nKDE 截图 / 显示器信息]
+    D --> H[可选 Work 调度\n本地桌面 IPC / 已有聊天]
 ```
 
 无需为 MCP 服务开放公网入站端口。健康检查仅绑定本机回环地址。浏览器不开放外部调试端口。
@@ -36,6 +38,7 @@ flowchart LR
 - Linux **x86_64**，systemd 用户服务，Python **3.10+**，Node.js **22+** 和 npm。
 - 浏览器功能需要已安装 Chrome 或 Chromium，以及可用的图形会话。
 - 桌面截图需要 KDE Plasma、`spectacle` 和 `kscreen-doctor`；验证环境为 KDE Wayland。其他桌面可用 `--no-desktop` 关闭截图功能。
+- 可选 Work 调度需要正在运行的兼容桌面应用，以及 Linux `flock`（通常由 util-linux 提供），用于跨桥接实例的任务锁。
 - ChatGPT 账号/工作区能够创建开发者插件，并提供 **Tunnel** 连接选项。此能力是否可用以账号实际界面为准，本项目不能开通账号权限。
 - 已在相应组织创建 Secure MCP Tunnel，并持有具备所需 **Tunnels Read + Use** 权限的 runtime key。创建 Tunnel 所需的管理权限与运行权限不同，见[官方文档](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)。
 
@@ -67,6 +70,9 @@ python3 scripts/deploy.py install --no-desktop
 
 # 仅文件和命令功能，可在无图形会话的机器使用
 python3 scripts/deploy.py install --no-desktop --no-browser
+
+# 为新安装生成启用本地 Work 调度的配置
+python3 scripts/deploy.py install --enable-work
 ```
 
 运行期间显示进度、耗时和内存信息。第一次安装需要从 GitHub 和 npm 下载依赖。安装不下载额外浏览器，使用你指定或自动发现的现有浏览器。
@@ -113,6 +119,33 @@ python3 scripts/deploy.py configure
 
 `desktop_screenshot` 返回 MCP 图像块。采集临时文件在返回前清理。Playwright 的 `browser_take_screenshot` 不传 `filename` 时返回图像及保存结果；传入 `filename` 时仅返回文件引用。收到图片数据、组件显示图片、模型理解图片是不同的验收环节。
 
+## 让主聊天调度本地 Work
+
+先在目标电脑运行桌面应用，并打开一个专用的本地 Work 聊天。为连接器启用 `work.enabled` 后，主聊天可以发现目标、派发任务、等待并取回结果，再根据结果追加下一项任务。已有配置在升级时会保留，启用方法见 [配置说明](docs/configuration.md#本地-work-调度)。
+
+| 工具 | 用途 |
+| --- | --- |
+| `work_info` | 查看连接状态、接口限制及配置 |
+| `work_list_chats` | 列出允许范围内的本地聊天信息 |
+| `work_list_skills` | 发现本地技能名称和准确路径 |
+| `work_send` | 向空闲目标派发或续派任务，可指定技能和插件 |
+| `work_status` / `work_result` | 按任务 ID 查看执行状态或读取结果 |
+| `work_wait` | 有界等待，最长 45 秒；未完成时返回当前状态 |
+| `work_interrupt` | 按已确认的执行轮中断指定派发任务 |
+| `work_compact` | 请求真实上下文压缩并跟踪其完成状态 |
+
+示例指令：
+
+> 使用 desktop-connector 的 work_info 和 work_list_chats，找到我已打开的本地 Work 测试聊天。以新的 request_id 调用 work_send，让它完成我指定的任务。保存返回的 task_id，用 work_wait 和 work_result 取回结果；需要继续时，等当前任务结束后再发送下一项任务。不要把请求已接受当作执行已完成。
+
+`work_send` 接受 `thread_id`、`prompt` 和必填的 `request_id`，另可附带 `skills: [{name, path}]`、`plugins: [{name, path}]`。技能路径是 `work_list_skills` 返回的绝对 `SKILL.md` 路径；插件必须在目标 Work 会话可用，路径使用准确的 `plugin://ID@SOURCE` 或 `app://ID` 引用。它们作为结构化输入交给 Work，不自动安装组件，也不改变目标模型、工作目录或权限。
+
+同一个 `request_id` 和相同输入重试会返回原任务记录；不能用这个 ID 提交不同内容。IPC 超时或连接中断时，执行结果可能仍不确定，应复用原 ID 或查询已有 `task_id`，避免重复执行。目标正在运行时，`work_send` 拒绝新任务；可等待结束，或显式中断后再派发。
+
+需要压缩时调用 `work_compact`，然后按它返回的 `task_id` 查询或等待；只有真实压缩事件完成才算通过。发送 `/compact` 文字不会代替压缩接口。
+
+此功能使用桌面内部 IPC，默认 `~/.codex/ipc/ipc.sock`，**与桌面版本耦合**。无需重启桌面或启用 `app-server proxy`，只支持桌面中可加载的已有本地 Work 聊天；云端 Work 和新建聊天不在此接口范围内。
+
 ## 日常管理
 
 ```bash
@@ -149,6 +182,8 @@ npm run test:desktop
 
 测试创建临时 HOME、配置和浏览器资料，不需要 Tunnel key，不修改已运行的生产连接。可通过 `CRC_TEST_BROWSER` 指定浏览器路径。CI 运行单元测试与无桌面依赖的 MCP 集成测试；图形操作需在本机运行最后一项。截图不会作为测试产物提交。
 
+Work 实机验收另见 `scripts/verify-work.mjs`，需要显式指定已存在且在桌面打开的专用聊天；它会实际发任务，附加选项还会测试中断和压缩。运行方式见 [排错与验收](docs/troubleshooting.md#work-实机验收)，不会自动新建聊天。
+
 | 组件 | 固定版本 |
 | --- | --- |
 | OpenAI tunnel-client | 0.0.14，Linux amd64，SHA-256 校验 |
@@ -168,8 +203,9 @@ src/                  MCP 桥接、配置、桌面截图、上游连接
 scripts/deploy.py     安装、隐藏凭据输入、状态、卸载服务
 scripts/run_tunnel.py systemd 的 Tunnel 启动入口
 scripts/verify.mjs    实际 MCP 与图形功能验收
+scripts/verify-work.mjs 可选的本地 Work 实机验收
 examples/            无凭据的配置示例
-tests/               配置、路由、取消、部署与凭据写入测试
+tests/               配置、路由、取消、Work 调度、部署与凭据写入测试
 docs/                配置与排错说明
 ```
 

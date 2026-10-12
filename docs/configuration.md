@@ -15,6 +15,8 @@
 | 专用浏览器资料 | `~/.local/share/chatgpt-remote-control/browser-profile/` |
 | 默认下载/输出 | `~/Downloads/ChatGPTBrowser/` |
 | 状态目录 | `~/.local/state/chatgpt-remote-control/` |
+| Work 任务状态 | `~/.local/state/chatgpt-remote-control/work/` |
+| 本地桌面 IPC | `~/.codex/ipc/ipc.sock` |
 | systemd 用户服务 | `~/.config/systemd/user/chatgpt-remote-control.service` |
 
 支持 XDG 配置、数据和状态目录。`install --home /absolute/path` 可为隔离测试指定一个替代用户目录；与 `--no-systemd` 配合使用，避免修改当前会话的服务。此选项不会创建操作系统用户或设置跨用户权限。
@@ -28,6 +30,7 @@
 - `desktop.spectaclePath`、`desktop.kscreenDoctorPath`：截图和显示器程序，支持绝对路径或可在服务 PATH 中找到的程序名。
 - `browser.enabled`：控制是否注册 Playwright 工具。
 - `browser.configFile`：Playwright JSON 配置路径。
+- `work.enabled`：是否注册本地 Work 调度工具，默认 `false`。
 
 `workspace`、`browser.configFile` 的相对路径基于主配置所在目录解析。JSON 中不会自动展开 `~` 或 `$HOME`；安装程序生成绝对路径。
 
@@ -50,6 +53,40 @@ CRC_CONFIG=/absolute/path/config.json node src/bridge.mjs
 `outputDir` 控制自动命名的文件及下载保存位置。显式相对文件名仍相对于 workspace；自动化指令优先使用绝对路径。
 
 本版本使用 Playwright 核心工具集，禁用页面动态注册的实验性 WebMCP 工具。核心集包含 `browser_run_code_unsafe` 等强权限工具；请参考 [权限说明](../SECURITY.md)。
+
+## 本地 Work 调度
+
+此功能把 ChatGPT 中的主聊天连接到已经运行的桌面应用，再向本地 Work 聊天提交任务。它使用桌面内部 IPC，默认套接字为 `~/.codex/ipc/ipc.sock`；不启动第二个 app-server，也不要求重启桌面应用。`app-server proxy` 所需的控制套接字和此 IPC 不是同一个接口。
+
+桌面应用内部协议会随版本变化，必须用目标机器上的实际版本验收。云端 Work 聊天不在此功能范围内。本地目标需要在桌面应用中可加载；派发前先打开目标聊天，让应用发现它的会话 owner。会话可用的插件、技能和账户权限由桌面应用决定。
+
+Work 调度还需要 Linux `flock`（util-linux）。任务派发通过内核文件锁协调同一状态目录下的多个桥接实例；锁随进程退出释放，不通过删除锁文件强行解锁。标准 Linux 安装通常已包含该程序。
+
+首次安装可使用 `install --enable-work` 生成启用配置。升级时已有 `config.json` 原样保留，`--enable-work` 不覆盖它；请在现有配置中添加或修改 `work`，然后只重启本项目服务并在 ChatGPT 刷新工具列表。`--force-config` 会重建其他配置，因此不应仅为启用 Work 而使用它。
+
+```json
+{
+  "work": {
+    "enabled": true,
+    "codexHome": "/home/YOUR_USER/.codex",
+    "socketPath": "/home/YOUR_USER/.codex/ipc/ipc.sock",
+    "stateDirectory": "/home/YOUR_USER/.local/state/chatgpt-remote-control/work",
+    "allowedThreadIds": [],
+    "allowCodexThreads": false,
+    "requestTimeoutMs": 10000
+  }
+}
+```
+
+上述片段需合并到主配置并替换占位符。`codexHome` 指向运行中的桌面应用数据目录；`socketPath` 指向其 IPC 套接字；`stateDirectory` 保存本项目任务记录，不应放进公开仓库。`requestTimeoutMs` 是单次 IPC 请求的超时，允许 1000 到 30000，默认 10000；与 Work 执行整个任务所需时间不同。
+
+`codexHome` 默认为用户 HOME 下的 `.codex`；`socketPath` 默认在其 `ipc/ipc.sock`；`stateDirectory` 默认使用 XDG 状态目录下的 `chatgpt-remote-control/work`。这些字段的相对路径基于主配置所在目录，不自动展开 JSON 中的 `~` 或 `$HOME`。
+
+`allowedThreadIds` 为空时允许所有匹配的本地 Work 聊天，设为非空数组则仅允许其中 ID。默认 `allowCodexThreads: false`，只允许本地 Work 来源；设为 `true` 可额外允许本地 Codex 聊天。两个条件共同限制发现和任务操作，不能用它访问云端聊天。建议专用测试/工作聊天配合非空 allowlist。
+
+`work_send` 和 `work_compact` 都要求唯一 `request_id`。相同内容重试会复用已保存的任务记录；更改内容必须使用新 ID。派发不确定时不能自动重新执行。目标繁忙时先等待或显式中断，再发新任务。`work_wait.timeout_ms` 允许 0 到 45000，默认 30000；0 返回即时状态。
+
+压缩操作通过专用 IPC 请求触发；向聊天发送 `/compact` 文本不等价于调用压缩接口。插件和技能可显式附在任务输入中，但名称和路径必须来自目标会话实际可用的组件。技能要求绝对 `SKILL.md` 文件路径，插件要求 `plugin://ID@SOURCE` 或 `app://ID` 引用；不会安装或启用缺失组件，目标模型、工作目录和权限仍从原聊天继承。
 
 ## 代理和端口
 
